@@ -138,9 +138,12 @@ def start_wechat(d, wait: float = 4.0, cold: bool = True) -> bool:
             pass
 
     # 显式 Activity 比 app_start 更稳（避免落到设置等无关页）
+    from utils.adb_utils import resolve_adb_path
+
     serial = getattr(d, "serial", None) or ""
     try:
-        cmd = ["adb"]
+        adb_bin = resolve_adb_path()
+        cmd = [adb_bin]
         if serial:
             cmd += ["-s", serial]
         cmd += ["shell", "am", "start", "-n", f"{WECHAT_PKG}/.ui.LauncherUI"]
@@ -158,7 +161,8 @@ def start_wechat(d, wait: float = 4.0, cold: bool = True) -> bool:
             return True
         # 再拉一次
         try:
-            cmd = ["adb"]
+            adb_bin = resolve_adb_path()
+            cmd = [adb_bin]
             if serial:
                 cmd += ["-s", serial]
             cmd += ["shell", "am", "start", "-n", f"{WECHAT_PKG}/.ui.LauncherUI"]

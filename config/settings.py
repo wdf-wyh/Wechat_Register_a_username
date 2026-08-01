@@ -37,7 +37,7 @@ class Settings:
     WECHAT_ELEMENT_TIMEOUT: float = 10.0   # 元素查找超时秒数
 
     # ===== ADB / 设备 =====
-    ADB_PATH: str = "adb"                  # ADB 可执行文件路径（默认从 PATH 找）
+    ADB_PATH: str = r"E:\tools\platform-tools\adb.exe"  # 本机 platform-tools；也可写 "adb" 走 PATH
     USB_CONNECTION_TIMEOUT: float = 30.0   # USB 连接超时
     DEVICE_HEALTH_CHECK_INTERVAL: float = 60.0  # 设备健康检查间隔（秒）
     ATX_AGENT_INIT_RETRY: int = 3          # ATX agent 初始化重试次数
