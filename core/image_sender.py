@@ -52,17 +52,15 @@
 
 ## 适配
 
-当前基于 Moto X70 Air Pro (1264x2780, Android 14) 校准。
-换设备需更新:
-  - ``_click_plus()`` 中的 "+" 按钮坐标
-  - ``_click_album()`` 中相册按钮的 OCR fallback
-  - ``_select_photos()`` 中的照片网格 fallback 坐标
+坐标按 ``config.device_profiles`` 机型配置加载。
+新机型请新增 profile 文件，勿直接改本模块硬编码覆盖旧机型。
 """
 
 import time
 import cv2
 import numpy as np
 
+from config.device_profiles import get_extra
 from utils.logger import get_logger
 
 logger = get_logger("image_sender")
@@ -71,19 +69,19 @@ logger = get_logger("image_sender")
 class ImageSender:
     """聊天图片发送器 — 搜索联系人 → 选图 → 发送。"""
 
-    # "+" 按钮 (右下角)
-    PLUS_BTN = (0.941, 0.942)  # (1189, 2620)
-
-    # 照片网格 fallback (与 moment_poster 一致)
-    PHOTO_GRID = [(158, 438), (475, 438), (792, 438), (1107, 438),
-                   (158, 756), (475, 756), (792, 756), (1107, 756)]
-
     def __init__(self, d, account_id: str = ""):
         self.d = d
         self.account_id = account_id
         self.w, self.h = d.info['displayWidth'], d.info['displayHeight']
         self._ocr = None
         self._clahe = None
+        # 按机型加载，百分比坐标
+        self.PLUS_BTN = tuple(get_extra(d, "plus_btn", (0.941, 0.942)))
+        grid = get_extra(d, "photo_grid") or []
+        # photo_grid 存百分比；内部 fallback 转像素
+        self.PHOTO_GRID = [
+            (int(self.w * rx), int(self.h * ry)) for rx, ry in grid
+        ]
 
     # ================================================================
     # 公共接口
@@ -119,66 +117,17 @@ class ImageSender:
 
     def _goto_chat(self, contact: str):
         """搜索联系人 → 进入聊天窗口。"""
+        from core.message_sender import MessageSender
+
         logger.debug(f"[{self.account_id}] 进入聊天: '{contact}'")
-        d, w, h = self.d, self.w, self.h
-
-        # 唤醒屏幕
-        d.screen_on()
-        time.sleep(0.3)
-        d.swipe(w // 2, int(h * 0.85), w // 2, int(h * 0.2), duration=0.3)
-        time.sleep(0.5)
-        # 冷启动微信
-        d.app_stop("com.tencent.mm")
-        time.sleep(1)
-        d.app_start("com.tencent.mm")
-        time.sleep(5)
-
-        # 微信 Tab
-        d.click(int(w * 0.125), int(h * 0.955))
-        time.sleep(2)
-
-        # 搜索
-        d.click(1050, 150)
-        time.sleep(2)
-        d.click(int(w * 0.5), int(h * 0.045))
-        time.sleep(0.8)
-
-        try:
-            d.set_input_ime(True)
-            time.sleep(0.3)
-            d.send_keys(contact)
-            time.sleep(0.5)
-            d.set_input_ime(False)
-        except Exception:
-            d.shell(f"input text {contact}")
-
-        d.press("enter")
-        time.sleep(2)
-
-        # OCR 找联系人并点击
-        img = np.array(d.screenshot(format="pillow"))
-        gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-        enhanced_bgr = cv2.cvtColor(self._enhance(gray), cv2.COLOR_GRAY2BGR)
-        results = self._ocr_region(enhanced_bgr, 0, 0, w, h)
-
-        contact_lower = contact.lower()
-        best_y = None
-        click_x, click_y = None, None
-
-        for text, cx, cy, conf, y0, _y1 in results:
-            if contact_lower in text.lower() and conf > 0.4 and y0 > 300:
-                if best_y is None or y0 < best_y:
-                    best_y = y0
-                    click_x = min(cx + 250, w - 50)
-                    click_y = y0 + 15
-
-        if click_x:
-            d.click(click_x, click_y)
-        else:
-            # fallback
-            d.click(467, 570)
-
-        time.sleep(3)
+        # 复用已修复的消息发送导航/搜索逻辑
+        ms = MessageSender(self.d, account_id=self.account_id)
+        ms._goto_home()
+        ms._search_contact(contact)
+        ms._click_contact_in_results(contact)
+        # 同步 OCR 实例，避免重复加载
+        self._ocr = ms._ocr
+        self._clahe = ms._clahe
         logger.debug(f"[{self.account_id}] 已进入聊天")
 
     # ================================================================
@@ -209,7 +158,8 @@ class ImageSender:
         if album_pos:
             d.click(*album_pos)
         else:
-            d.click(int(w * 0.25), int(h * 0.55))  # fallback
+            ax, ay = get_extra(self.d, "album_menu", (0.25, 0.55))
+            d.click(int(w * ax), int(h * ay))
 
         time.sleep(3)
 

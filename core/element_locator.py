@@ -18,6 +18,7 @@ from typing import Optional
 
 import uiautomator2 as u2
 
+from config.device_profiles import get_coord
 from config.wechat_elements import locate_element, WECHAT_ELEMENTS, COORDINATE_FALLBACK
 from utils.logger import get_logger
 
@@ -30,12 +31,20 @@ class ElementLocator:
 
     封装了等待、重试、异常处理等常用模式，
     让上层脚本代码更简洁。
+    坐标 fallback 按当前设备机型配置解析，多机型互不覆盖。
     """
 
     def __init__(self, d: u2.Device, default_timeout: float = 10.0):
         self.d = d
         self.default_timeout = default_timeout
         self._coords_used: set[str] = set()  # Track which elements use coordinates
+
+    def _fallback_coord(self, element_name: str) -> Optional[tuple[float, float]]:
+        """按机型取百分比坐标，找不到再查默认表。"""
+        c = get_coord(self.d, element_name)
+        if c is not None:
+            return c
+        return COORDINATE_FALLBACK.get(element_name)
 
     # ================================================================
     # 基础定位
@@ -54,7 +63,7 @@ class ElementLocator:
         """
         if timeout is None:
             # 有坐标 fallback 时用短超时，快速切换到坐标模式
-            if element_name in COORDINATE_FALLBACK:
+            if self._fallback_coord(element_name) is not None:
                 timeout = 2.0
             else:
                 timeout = self.default_timeout
@@ -93,9 +102,10 @@ class ElementLocator:
             except Exception as e:
                 logger.warning(f"元素点击 '{element_name}' 异常: {e}")
 
-        # === Fallback: coordinate-based click ===
-        if element_name in COORDINATE_FALLBACK:
-            x_ratio, y_ratio = COORDINATE_FALLBACK[element_name]
+        # === Fallback: 按机型百分比坐标点击 ===
+        fb = self._fallback_coord(element_name)
+        if fb is not None:
+            x_ratio, y_ratio = fb
             w = self.d.info['displayWidth']
             h = self.d.info['displayHeight']
             x, y = int(w * x_ratio), int(h * y_ratio)
@@ -140,9 +150,10 @@ class ElementLocator:
                 except Exception as e:
                     logger.warning(f"点击 '{element_name}' 异常: {e}")
 
-        # === Fallback: coordinate-based click ===
-        if element_name in COORDINATE_FALLBACK:
-            x_ratio, y_ratio = COORDINATE_FALLBACK[element_name]
+        # === Fallback: 按机型百分比坐标点击 ===
+        fb = self._fallback_coord(element_name)
+        if fb is not None:
+            x_ratio, y_ratio = fb
             w = self.d.info['displayWidth']
             h = self.d.info['displayHeight']
             x, y = int(w * x_ratio), int(h * y_ratio)

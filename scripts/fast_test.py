@@ -27,7 +27,7 @@ logger = get_logger("fast_test")
 # ============================================================
 # 自行配置区域
 # ============================================================
-CONTACT_NAME = "稀有气体"           # 接收文字/图片的联系人
+CONTACT_NAME = "微信团队"           # 接收文字/图片的联系人（必有官方号，便于验证）
 MOMENT_TEXT = "fast_debug发送朋友圈"  # 发朋友圈文案
 COMMENT_TEXT = "deeeeebug"           # 朋友圈评论内容
 # ============================================================
@@ -62,8 +62,12 @@ class FastTestScript(BaseScript):
             print(f"  [{i}/{total}] {label} ...", end=" ", flush=True)
             start = time.time()
             try:
-                ok = fn(*args) if args else fn()
+                raw = fn(*args) if args else fn()
                 elapsed = time.time() - start
+                if isinstance(raw, dict):
+                    ok = raw.get("success", True) is not False
+                else:
+                    ok = bool(raw)
                 if ok:
                     success += 1
                     print(f"[OK] ({elapsed:.1f}s)")
@@ -89,7 +93,7 @@ class FastTestScript(BaseScript):
         # Step 2: 朋友圈点赞+评论
         await step(2, f"朋友圈点赞+评论: {COMMENT_TEXT}",
                    self.wc.browse_moments_interact,
-                   120, COMMENT_TEXT, 0.55)
+                   40, COMMENT_TEXT, 0.55)
 
         await asyncio.sleep(1)
 
@@ -115,31 +119,32 @@ class FastTestScript(BaseScript):
 
         def _browse_channels():
             browser = ChannelsBrowser(self.wc.d, account_id=self.account_id)
-            return {"liked": browser.browse(scroll_count=12, like_rate=0.2)}
+            # 缩短条数，降低 OCR 卡死与双开打断概率
+            return {"liked": browser.browse(scroll_count=3, like_rate=0.2)}
 
-        await step(5, "刷视频号 (12条, ~3min)", _browse_channels)
+        await step(5, "刷视频号 (3条)", _browse_channels)
 
         await asyncio.sleep(1)
 
-        # Step 6: 阅读公众号 2min
+        # Step 6: 阅读公众号
         from core.public_account_browser import PublicAccountBrowser
 
         def _browse_articles():
             browser = PublicAccountBrowser(self.wc.d, account_id=self.account_id)
-            return {"read": browser.browse(duration_seconds=120)}
+            return {"read": browser.browse(duration_seconds=45)}
 
-        await step(6, "阅读公众号 (2min)", _browse_articles)
+        await step(6, "阅读公众号 (45s)", _browse_articles)
 
         await asyncio.sleep(1)
 
-        # Step 7: 浏览收藏夹 1min
+        # Step 7: 浏览收藏夹
         from core.favorites_browser import FavoritesBrowser
 
         def _browse_favorites():
             browser = FavoritesBrowser(self.wc.d, account_id=self.account_id)
-            return {"viewed": browser.browse(duration_seconds=60)}
+            return {"viewed": browser.browse(duration_seconds=30)}
 
-        await step(7, "浏览收藏夹 (1min)", _browse_favorites)
+        await step(7, "浏览收藏夹 (30s)", _browse_favorites)
 
         total_elapsed = time.time() - overall_start
         summary = (

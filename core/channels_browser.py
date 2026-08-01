@@ -11,7 +11,7 @@
 
 ::
 
-    冷启动 → 发现Tab → 视频号入口 (258, 582)
+    冷启动 → 发现Tab → OCR/相对坐标点「视频号」
       │
       ├─ 上滑切换视频 (随机停留 2~180s)
       │
@@ -46,10 +46,8 @@
 
 ## 适配
 
-基于 Moto X70 Air Pro (1264x2780, Android 14) 校准。
-换设备需更新:
-  - ``CHANNELS_ENTRY`` 视频号入口坐标
-  - ``LIKE_ICON_X_OFFSET`` 图标与计数的 x 偏移
+基于相对坐标 + OCR，适配不同分辨率。
+点赞图标相对计数的偏移用屏幕宽度比例。
 """
 
 import time
@@ -57,6 +55,13 @@ import random
 import cv2
 import numpy as np
 
+from core.wechat_nav import (
+    channels_entry_for,
+    click_ratio,
+    goto_tab,
+    ocr_find_and_click,
+    start_wechat,
+)
 from utils.logger import get_logger
 
 logger = get_logger("channels_browser")
@@ -65,18 +70,15 @@ logger = get_logger("channels_browser")
 class ChannelsBrowser:
     """视频号浏览器 — 刷视频 + 概率点赞。"""
 
-    # 视频号入口 (发现页)
-    CHANNELS_ENTRY = (258, 582)
-
-    # 点赞图标在计数文字左侧的 x 偏移
-    LIKE_ICON_X_OFFSET = -50
+    # 点赞图标在计数文字左侧的偏移（相对屏宽）
+    LIKE_ICON_X_OFFSET_RATIO = -0.04
 
     # 默认点赞概率
     DEFAULT_LIKE_RATE = 0.2
 
-    # 观看停留时间范围 (秒)
+    # 观看停留时间范围 (秒) — 上限下调，避免单次卡死过久
     DWELL_MIN = 2.0
-    DWELL_MAX = 180.0
+    DWELL_MAX = 25.0
 
     def __init__(self, d, account_id: str = ""):
         self.d = d
@@ -84,6 +86,8 @@ class ChannelsBrowser:
         self.w, self.h = d.info['displayWidth'], d.info['displayHeight']
         self._ocr = None
         self._clahe = None
+        # 按当前机型取视频号入口，不写死某一分辨率
+        self.CHANNELS_ENTRY = channels_entry_for(d)
 
     # ================================================================
     # 公共接口
@@ -127,19 +131,26 @@ class ChannelsBrowser:
     # ================================================================
 
     def _enter_channels(self):
-        """冷启动 → 发现 → 视频号。"""
-        d, w, h = self.d, self.w, self.h
-        d.screen_on()
-        time.sleep(0.3)
-        d.swipe(w // 2, int(h * 0.85), w // 2, int(h * 0.2), duration=0.3)
-        time.sleep(0.5)
-        d.app_stop("com.tencent.mm")
-        time.sleep(1)
-        d.app_start("com.tencent.mm")
-        time.sleep(5)
-        d.click(int(w * 0.625), int(h * 0.955))  # 发现
-        time.sleep(2)
-        d.click(*self.CHANNELS_ENTRY)
+        """冷启动 → 发现 → 视频号（OCR 优先，相对坐标 fallback）。"""
+        d = self.d
+        start_wechat(d, wait=4.0, cold=True)
+        goto_tab(d, "discover")
+        time.sleep(1.0)
+
+        # OCR 找「视频号」
+        clicked = ocr_find_and_click(
+            d,
+            self._get_ocr(),
+            ["视频号"],
+            y_min_ratio=0.08,
+            y_max_ratio=0.55,
+            conf_min=0.3,
+            enhance=self._enhance,
+            click_row_center=True,
+        )
+        if not clicked:
+            logger.warning(f"[{self.account_id}] OCR未找到视频号，使用相对坐标")
+            click_ratio(d, *self.CHANNELS_ENTRY)
         time.sleep(3)
 
     def _swipe_next(self):
@@ -186,7 +197,7 @@ class ChannelsBrowser:
             return False
 
         counts.sort(key=lambda c: c[0])  # 按 x 排序
-        like_x = counts[0][0] + self.LIKE_ICON_X_OFFSET  # 最左边=点赞, 图标在左
+        like_x = counts[0][0] + int(w * self.LIKE_ICON_X_OFFSET_RATIO)
         like_y = counts[0][1]
 
         logger.debug(f"[{self.account_id}] 点赞: ({like_x},{like_y})")

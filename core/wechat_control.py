@@ -62,16 +62,10 @@ class WeChatControl:
         解决微信已在后台运行导致某些操作异常的问题。
         """
         logger.info(f"[{self.account_id}] 正在冷重启微信...")
-        try:
-            self.d.app_stop("com.tencent.mm")
-        except Exception:
-            pass
-        time.sleep(1.5)
-        self.d.app_start("com.tencent.mm")
-        # 微信冷启动通常需要 3-5 秒，固定等 5 秒即可
-        time.sleep(5)
+        from core.wechat_nav import start_wechat
+        ok = start_wechat(self.d, wait=4.0, cold=True)
         logger.info(f"[{self.account_id}] 微信冷重启完成")
-        return True
+        return ok
 
     def go_to_tab(self, tab_name: str) -> bool:
         """

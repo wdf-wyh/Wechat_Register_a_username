@@ -125,24 +125,36 @@ class MomentPoster:
 
     def _navigate_to_moments(self):
         """冷启动微信 → 发现 → 朋友圈 → 顶部。"""
+        from core.wechat_nav import (
+            moments_entry_for,
+            click_ratio,
+            goto_tab,
+            ocr_find_and_click,
+            start_wechat,
+        )
+
         logger.debug(f"[{self.account_id}] 导航到朋友圈...")
-        d, w, h = self.d, self.w, self.h
+        d = self.d
+        start_wechat(d, wait=4.0, cold=True)
+        goto_tab(d, "discover")
+        time.sleep(1.0)
 
-        d.screen_on()
-        time.sleep(0.3)
-        d.swipe(w // 2, int(h * 0.85), w // 2, int(h * 0.2), duration=0.3)
-        time.sleep(0.5)
-        d.app_stop("com.tencent.mm")
-        time.sleep(1)
-        d.app_start("com.tencent.mm")
-        time.sleep(5)
-
-        d.click(int(w * 0.625), int(h * 0.955))   # 发现 tab
-        time.sleep(2)
-        d.click(int(w * 0.32), int(h * 0.131))      # 朋友圈入口
-        time.sleep(3)
+        clicked = ocr_find_and_click(
+            d,
+            self._get_ocr(),
+            ["朋友圈"],
+            y_min_ratio=0.08,
+            y_max_ratio=0.45,
+            conf_min=0.3,
+            enhance=self._clahe_enhance,
+            click_row_center=True,
+        )
+        if not clicked:
+            click_ratio(d, *moments_entry_for(d))
+        time.sleep(2.5)
+        w, h = self.w, self.h
         d.swipe(w // 2, int(h * 0.3), w // 2, int(h * 0.7), duration=0.3)
-        time.sleep(2)
+        time.sleep(1.5)
 
     # ================================================================
     # 阶段1: OpenCV 模板匹配相机
@@ -155,7 +167,7 @@ class MomentPoster:
 
         img = np.array(d.screenshot(format="pillow"))
         g = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-        search = g[80:250, 950:min(1264, w)]
+        search = g[int(h * 0.03):int(h * 0.12), int(w * 0.70):w]
 
         best_match, best_val = None, 0
         template_dir = Path("screenshots")
@@ -176,9 +188,11 @@ class MomentPoster:
                 _, mv, _, ml = cv2.minMaxLoc(result)
                 if mv > best_val:
                     best_val = mv
-                    best_match = {"x": ml[0] + sw // 2 + 950,
-                                  "y": ml[1] + sh // 2 + 80,
-                                  "score": mv}
+                    best_match = {
+                        "x": ml[0] + sw // 2 + int(w * 0.70),
+                        "y": ml[1] + sh // 2 + int(h * 0.03),
+                        "score": mv,
+                    }
 
         if best_match and best_match["score"] > 0.4:
             cx, cy = best_match["x"], best_match["y"]
@@ -431,7 +445,7 @@ class MomentPoster:
         g = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
         if self._is_dimmed():
             return False
-        return np.mean(g[80:250, :]) > 120
+        return np.mean(g[int(self.h * 0.03):int(self.h * 0.12), :]) > 120
 
     def _clahe_enhance(self, gray_img):
         """CLAHE 增强低对比度文字。"""

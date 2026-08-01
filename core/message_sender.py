@@ -55,6 +55,7 @@ import time
 import cv2
 import numpy as np
 
+from config.device_profiles import get_extra
 from utils.logger import get_logger
 
 logger = get_logger("message_sender")
@@ -63,21 +64,15 @@ logger = get_logger("message_sender")
 class MessageSender:
     """微信消息发送器 — 搜索联系人 → 发消息。"""
 
-    # 搜索图标
-    SEARCH_ICON = (0.831, 0.054)   # (1050, 150)
-
-    # 发送按钮 fallback
-    SEND_FALLBACK = (0.88, 0.955)  # (1112, 2655)
-
-    # 输入框 fallback
-    INPUT_FALLBACK = (0.35, 0.955)  # (442, 2654)
-
     def __init__(self, d, account_id: str = ""):
         self.d = d
         self.account_id = account_id
         self.w, self.h = d.info['displayWidth'], d.info['displayHeight']
         self._ocr = None
         self._clahe = None
+        self.SEARCH_ICON = tuple(get_extra(d, "msg_search_icon", (0.831, 0.054)))
+        self.SEND_FALLBACK = tuple(get_extra(d, "msg_send", (0.88, 0.93)))
+        self.INPUT_FALLBACK = tuple(get_extra(d, "msg_input", (0.35, 0.93)))
 
     # ================================================================
     # 公共接口
@@ -114,43 +109,43 @@ class MessageSender:
 
     def _goto_home(self):
         """冷启动微信 → 微信 Tab。"""
-        d, w, h = self.d, self.w, self.h
-        d.screen_on()
-        time.sleep(0.3)
-        d.swipe(w // 2, int(h * 0.85), w // 2, int(h * 0.2), duration=0.3)
-        time.sleep(0.5)
-        d.app_stop("com.tencent.mm")
-        time.sleep(1)
-        d.app_start("com.tencent.mm")
-        time.sleep(5)
-        d.click(int(w * 0.125), int(h * 0.955))
-        time.sleep(2)
+        from core.wechat_nav import goto_tab, start_wechat
+
+        start_wechat(self.d, wait=4.0, cold=True)
+        goto_tab(self.d, "wechat")
 
     def _search_contact(self, contact: str):
         """点击搜索图标 → IME 输入联系人 → Enter。"""
+        from core.wechat_nav import open_search
+
         d, w, h = self.d, self.w, self.h
 
-        # 点击搜索图标
-        d.click(int(w * self.SEARCH_ICON[0]), int(h * self.SEARCH_ICON[1]))
-        time.sleep(2)
+        if not open_search(d):
+            # fallback 单点
+            d.click(int(w * self.SEARCH_ICON[0]), int(h * self.SEARCH_ICON[1]))
+            time.sleep(2)
 
         # 点击输入框
         d.click(int(w * 0.50), int(h * 0.045))
         time.sleep(0.8)
 
-        # IME 输入
+        # IME 输入（中文必须走 IME，shell input text 会乱码/失败）
         try:
             d.set_input_ime(True)
             time.sleep(0.3)
             d.send_keys(contact)
-            time.sleep(0.5)
+            time.sleep(0.8)
             d.set_input_ime(False)
-        except Exception:
-            d.shell(f"input text {contact}")
+        except Exception as e:
+            logger.warning(f"[{self.account_id}] IME输入失败: {e}")
+            try:
+                d(focused=True).set_text(contact)
+            except Exception:
+                pass
 
         time.sleep(0.3)
         d.press("enter")
-        time.sleep(2)
+        time.sleep(2.5)
         logger.debug(f"[{self.account_id}] 搜索: '{contact}'")
 
     # ================================================================
@@ -160,15 +155,13 @@ class MessageSender:
     def _click_contact_in_results(self, contact: str):
         """
         OCR 分析搜索结果页:
-          1. 找到"联系人"区块
-          2. 在其下方找目标联系人
-          3. 点击进入聊天
+          1. 找到目标联系人（支持子串/模糊）
+          2. 点击文字中心进入聊天
         """
         logger.debug(f"[{self.account_id}] OCR找联系人: '{contact}'")
         d, w, h = self.d, self.w, self.h
 
         img = np.array(d.screenshot(format="pillow"))
-        img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
         gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
         enhanced = self._enhance(gray)
         enhanced_bgr = cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
@@ -176,24 +169,45 @@ class MessageSender:
         results = self._ocr_region(enhanced_bgr, 0, 0, w, h)
 
         contact_x, contact_y = None, None
-        contact_lower = contact.lower()
+        contact_lower = contact.lower().replace(" ", "")
+        y_min = int(h * 0.10)
+
+        # 别名：文件传输助手常见 OCR 误读
+        aliases = {contact_lower}
+        if "文件传输" in contact or "传输助手" in contact:
+            aliases.update({"文件传输助手", "文件传输", "传输助手", "file helper", "filehelper"})
 
         for text, cx, cy, conf, y0, _y1 in results:
             if conf < 0.2:
                 continue
+            t = (text or "").strip().lower().replace(" ", "")
+            if y0 <= y_min:
+                continue
+            hit = any(a in t or t in a for a in aliases if a)
+            if not hit:
+                continue
+            if contact_y is None or y0 < contact_y:
+                contact_y = cy
+                contact_x = cx
 
-            # 找到目标联系人（在输入框下方，跳过搜索输入框内的文字）
-            if contact_lower in text.lower() and y0 > 250:
-                if contact_y is None or y0 < contact_y:
-                    contact_y = y0
-                    contact_x = cx
+        if contact_x is None:
+            # 再试一次不增强的原图
+            results2 = self._ocr_region(
+                cv2.cvtColor(img, cv2.COLOR_RGB2BGR), 0, 0, w, h)
+            for text, cx, cy, conf, y0, _y1 in results2:
+                if conf < 0.15 or y0 <= y_min:
+                    continue
+                t = (text or "").strip().lower().replace(" ", "")
+                if any(a in t or t in a for a in aliases if a):
+                    contact_x, contact_y = cx, cy
+                    break
 
         if contact_x is None:
             raise RuntimeError(f"未找到联系人 '{contact}'")
 
-        # 点击联系人（文字右侧，避免点到头像太小）
-        click_x = min(contact_x + 200, w - 50)
-        click_y = contact_y + 30
+        # 点文字中心偏右一点（避开头像）
+        click_x = min(contact_x + int(w * 0.08), w - 40)
+        click_y = contact_y
         d.click(click_x, click_y)
         time.sleep(3)
         logger.debug(f"[{self.account_id}] 点击联系人: ({click_x},{click_y})")

@@ -19,6 +19,8 @@
 
 import uiautomator2 as u2
 
+from config.device_profiles.moto_x70_air_pro import PROFILE as _MOTO_PROFILE
+
 # ============================================================
 # 微信包名 & Activity
 # ============================================================
@@ -101,49 +103,12 @@ WECHAT_ELEMENTS: dict[str, dict] = {
 # 坐标 Fallback 映射表（微信屏蔽 UiAutomation 时使用）
 # ============================================================
 # 坐标为屏幕百分比 (x_ratio, y_ratio)，例如 (0.5, 0.85) 表示屏幕正中间偏下。
-# 基于 Moto X70 Air Pro (1264x2780) 实测校准。
+#
+# ⚠️ 多机型：本表仅保留「默认 / Moto」基线，供未接设备时的静态引用。
+# 运行时请用 config.device_profiles.get_coord(d, name)，按分辨率自动选机型。
+# 新机型请加 config/device_profiles/<机型>.py，禁止直接改本表覆盖旧机型。
 
-COORDINATE_FALLBACK: dict[str, tuple[float, float]] = {
-    # ===== 底部导航 Tab =====
-    "tab_wechat":    (0.125, 0.955),   # 微信    (Y=2655 / 2780)
-    "tab_contacts":  (0.375, 0.955),   # 通讯录
-    "tab_discover":  (0.625, 0.955),   # 发现
-    "tab_me":        (0.875, 0.955),   # 我
-
-    # ===== 发现页 =====
-    "moments_entry":       (0.32, 0.131),   # 朋友圈  y=365 / 2780
-    "channels_entry":      (0.32, 0.207),   # 视频号  y=575 / 2780
-    "scan_entry":          (0.32, 0.277),   # 扫一扫  y=770 / 2780
-    "search_entry":        (0.32, 0.347),   # 搜一搜  y=965 / 2780
-    "mini_program_entry":  (0.32, 0.417),   # 小程序  y=1160 / 2780
-
-    # ===== 聊天列表（微信首页） =====
-    "search_btn":          (0.736, 0.058),  # 顶部搜索 (x=930, y=160)
-
-    # ===== 聊天窗口内部 =====
-    "chat_input_box":      (0.50, 0.965),   # 底部输入框
-    "chat_send_btn":       (0.90, 0.965),   # 发送按钮
-    "chat_more_btn":       (0.92, 0.965),   # + 按钮
-    "chat_voice_btn":      (0.08, 0.965),   # 语音按钮
-
-    # ===== 通讯录页 =====
-    "contacts_public_acct": (0.50, 0.180),  # 公众号
-    "contacts_group":       (0.50, 0.230),  # 群聊
-
-    # ===== "我" 页面 =====
-    "me_services":     (0.50, 0.310),   # 服务
-    "me_favorites":    (0.50, 0.352),   # 收藏
-    "me_settings":     (0.50, 0.525),   # 设置
-
-    # ===== 服务/支付页 =====
-    "services_wallet":     (0.50, 0.216),   # 钱包
-    "services_receipt":    (0.50, 0.140),   # 收付款
-
-    # ===== 通用 =====
-    "generic_back":   (0.05, 0.06),    # 左上角返回
-    "generic_more":   (0.95, 0.06),    # 右上角更多
-    "generic_close":  (0.05, 0.06),    # 左上角关闭
-}
+COORDINATE_FALLBACK: dict[str, tuple[float, float]] = dict(_MOTO_PROFILE.coords)
 
 
 def locate_element(

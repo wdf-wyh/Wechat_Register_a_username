@@ -151,10 +151,31 @@ Cron 负责**准时执行**，Agent 负责**智能决策和故障处理**：
 |------|------|------|
 | `core/` | **只读** | 除非用户明确要求 fix bug，否则不得修改 |
 | `config/` | **只读** | 定位字典和参数，改动可能影响全部账号 |
+| `config/device_profiles/` | **可新增** | 新机型只加新文件并注册，禁止改旧机型文件覆盖坐标 |
 | `scripts/` | 可改 | 行为剧本，用户要求时可调整时间和频率 |
 | `storage/schema.sql` | **禁止** | 改表结构会导致数据丢失 |
 | `CLAUDE.md` | 可改 | 本文件，用户要求时可更新 |
 | 其他 | 可改 | `main.py`、`README.md`、测试脚本等 |
+
+### 4.4.1 多机型坐标适配（重要）
+
+不同分辨率手机的百分比坐标不同。**禁止**为适配新机型直接改全局坐标，覆盖旧机型。
+
+正确做法：
+1. 在 `config/device_profiles/` 新增 `<机型>.py`（复制已有机型文件改坐标）
+2. 在 `config/device_profiles/__init__.py` 的 `PROFILES` 列表注册
+3. 运行时按分辨率/型号自动匹配（`resolve_profile(d)`）
+
+已内置：
+- `moto_x70_air_pro` — 1264×2780（默认）
+- `redmi_k30_pro` — 1080×2400
+
+```python
+from config.device_profiles import resolve_profile, list_profiles
+print(list_profiles())
+print(resolve_profile(d).display_name)
+```
+
 
 ### 4.5 Agent 日常监控流程
 

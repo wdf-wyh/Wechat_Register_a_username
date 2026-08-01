@@ -103,24 +103,26 @@ class FavoritesBrowser:
 
     def _navigate_to_favorites(self):
         """冷启动微信 → 我 Tab → 收藏。"""
+        from core.wechat_nav import goto_tab, ocr_find_and_click, start_wechat
+
         logger.debug(f"[{self.account_id}] 导航到收藏夹")
         d, w, h = self.d, self.w, self.h
+        start_wechat(d, wait=4.0, cold=True)
+        goto_tab(d, "me")
 
-        d.screen_on()
-        time.sleep(0.3)
-        d.swipe(w // 2, int(h * 0.85), w // 2, int(h * 0.2), duration=0.3)
-        time.sleep(0.5)
-        d.app_stop("com.tencent.mm")
-        time.sleep(1)
-        d.app_start("com.tencent.mm")
-        time.sleep(5)
-
-        # 我 Tab
-        d.click(int(w * 0.875), int(h * 0.955))
-        time.sleep(1.5)
-
-        # 收藏
-        d.click(int(w * 0.50), int(h * 0.352))
+        clicked = ocr_find_and_click(
+            d,
+            self._get_ocr(),
+            ["收藏"],
+            y_min_ratio=0.15,
+            y_max_ratio=0.70,
+            conf_min=0.35,
+            enhance=self._enhance,
+        )
+        if not clicked:
+            from config.device_profiles import get_nav
+            rx, ry = get_nav(d, "favorites_entry", (0.50, 0.352))
+            d.click(int(w * rx), int(h * ry))
         time.sleep(2.5)
 
     # ================================================================

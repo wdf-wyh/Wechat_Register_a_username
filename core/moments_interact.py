@@ -81,10 +81,8 @@ logger = get_logger("moments_interact")
 class MomentsInteract:
     """朋友圈互动器 — OCR 定位 + 点赞 + 评论 + 页面恢复。"""
 
-    # ==== 设备相关常数 (基于 Moto X70 Air Pro 1264x2780 校准) ====
-    DOTS_X_RATIO = 0.69      # "..." 相对时间戳的 X 偏移比例 (0.69w/1264 ≈ 0.69)
-    BAND_Y_MARGIN = 75        # 菜单窄带 OCR 的 Y 范围
-    MENU_RETRY = 9            # 点击 "..." 最大重试次数
+    BAND_Y_MARGIN = 90        # 菜单窄带 OCR 的 Y 范围
+    MENU_RETRY = 12           # 点击 "..." 最大重试次数
 
     # 时间戳匹配正则
     TIMESTAMP_PATTERNS = [
@@ -104,6 +102,11 @@ class MomentsInteract:
         self.w, self.h = d.info['displayWidth'], d.info['displayHeight']
         self._ocr = None
         self._clahe = None
+        from config.device_profiles import get_extra
+        self.DOTS_X_RATIOS = tuple(
+            get_extra(d, "moments_dots_x_ratios",
+                      (0.92, 0.90, 0.88, 0.94, 0.86))
+        )
 
     # ================================================================
     # 公共接口
@@ -189,6 +192,11 @@ class MomentsInteract:
                      f"rate={like_rate:.0%} comment='{comment_text[:20]}'")
 
         self._ensure_on_moments()
+        if not self._is_on_moments():
+            logger.error(f"[{self.account_id}] 无法进入朋友圈, 退出")
+            return {"liked": 0, "commented": 0, "recovered": 0,
+                    "elapsed": 0, "success": False}
+
         liked = commented = recovered = 0
         rd = 0
         start_time = time.time()
@@ -267,6 +275,7 @@ class MomentsInteract:
             "commented": commented,
             "recovered": recovered,
             "elapsed": elapsed,
+            "success": True,
         }
 
     # ================================================================
@@ -274,13 +283,35 @@ class MomentsInteract:
     # ================================================================
 
     def _is_on_moments(self) -> bool:
-        """OCR 检测顶部是否有 '朋友圈' 标题。"""
+        """OCR 检测是否在朋友圈页（勿用「昨天」等会话列表常见词）。"""
         img = np.array(self.d.screenshot(format="pillow"))
         gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
         enhanced = cv2.cvtColor(self._enhance(gray), cv2.COLOR_GRAY2BGR)
-        top = enhanced[80:250, int(self.w * 0.2):int(self.w * 0.8)]
-        for _, t, c in self._get_ocr().readtext(top):
-            if c > 0.3 and "朋友圈" in t:
+        top = enhanced[int(self.h * 0.02):int(self.h * 0.18),
+                       int(self.w * 0.05):int(self.w * 0.95)]
+        mid = enhanced[int(self.h * 0.15):int(self.h * 0.75),
+                       int(self.w * 0.05):int(self.w * 0.95)]
+        texts = []
+        for region in (top, mid):
+            for _, t, c in self._get_ocr().readtext(region):
+                if c > 0.25 and t:
+                    texts.append(t.strip())
+        blob = " ".join(texts)
+        # 负向：仍在会话列表 / 发现页
+        if any(k in blob for k in ("通讯录", "腾讯新闻", "服务通知", "视频号", "扫一扫")):
+            # 发现页有视频号；朋友圈内一般没有这些
+            if "朋友圈" not in blob and "更换封面" not in blob and "轻触更换" not in blob:
+                if "视频号" in blob or "扫一扫" in blob or "通讯录" in blob:
+                    return False
+        markers = (
+            "朋友圈", "轻触更换封面", "更换封面", "还没有朋友", "拍一张",
+            "这一刻的想法",
+        )
+        if any(k in blob for k in markers):
+            return True
+        # 有时间戳 + 不在发现/会话：弱判定
+        if "分钟前" in blob or "小时前" in blob:
+            if not any(k in blob for k in ("微信(", "腾讯新闻", "服务通知")):
                 return True
         return False
 
@@ -296,30 +327,44 @@ class MomentsInteract:
 
     def _ensure_on_moments(self):
         """进入朋友圈并确保标题可见。"""
-        # Wake screen
-        self.d.screen_on()
-        time.sleep(0.3)
-        self.d.swipe(self.w // 2, int(self.h * 0.85),
-                     self.w // 2, int(self.h * 0.2), duration=0.3)
-        time.sleep(0.5)
+        from core.wechat_nav import (
+            moments_entry_for,
+            click_ratio,
+            goto_tab,
+            ocr_find_and_click,
+            start_wechat,
+        )
 
-        # If already on moments, skip navigation
+        start_wechat(self.d, wait=4.0, cold=True)
+
         if self._is_on_moments():
             return
 
-        self.d.app_stop("com.tencent.mm")
-        time.sleep(1)
-        self.d.app_start("com.tencent.mm")
-        time.sleep(5)
-        self.d.click(int(self.w * 0.625), int(self.h * 0.955))    # 发现
-        time.sleep(1.5)
-        self.d.click(int(self.w * 0.32), int(self.h * 0.131))      # 朋友圈
+        goto_tab(self.d, "discover")
+        time.sleep(1.0)
+
+        clicked = ocr_find_and_click(
+            self.d,
+            self._get_ocr(),
+            ["朋友圈"],
+            y_min_ratio=0.08,
+            y_max_ratio=0.45,
+            conf_min=0.3,
+            enhance=self._enhance,
+            click_row_center=True,
+        )
+        if not clicked:
+            logger.warning(f"[{self.account_id}] OCR未找到朋友圈入口，使用相对坐标")
+            click_ratio(self.d, *moments_entry_for(self.d))
         time.sleep(2)
-        # 下滑 3 次露出标题
-        for _ in range(3):
-            self.d.swipe(self.w // 2, int(self.h * 0.55),
-                         self.w // 2, int(self.h * 0.30), duration=0.2)
-            time.sleep(1)
+
+        # 轻微上滑露出时间戳（空页/封面页不必猛滑）
+        self.d.swipe(self.w // 2, int(self.h * 0.55),
+                     self.w // 2, int(self.h * 0.40), duration=0.2)
+        time.sleep(0.8)
+
+        if not self._is_on_moments():
+            logger.error(f"[{self.account_id}] 进入朋友圈后仍未检测到标题")
 
     # ================================================================
     # 时间戳定位
@@ -332,43 +377,60 @@ class MomentsInteract:
         enhanced = cv2.cvtColor(self._enhance(gray), cv2.COLOR_GRAY2BGR)
 
         results = self._get_ocr().readtext(
-            enhanced, text_threshold=0.4, low_text=0.3)
+            enhanced, text_threshold=0.3, low_text=0.2)
 
         posts = []
         for bbox, text, conf in results:
-            if conf < 0.3:
+            if conf < 0.18:
                 continue
             text = text.strip()
-            if not any(re.search(p, text) for p in self.TIMESTAMP_PATTERNS):
+            # 宽松匹配：正则或含「分钟前/小时前/天前/刚刚」
+            hit = any(re.search(p, text) for p in self.TIMESTAMP_PATTERNS)
+            if not hit:
+                hit = any(k in text for k in ("分钟前", "小时前", "天前", "刚刚"))
+            if not hit:
                 continue
             cx = int((bbox[0][0] + bbox[2][0]) / 2)
             cy = int((bbox[0][1] + bbox[2][1]) / 2)
-            posts.append({"x": cx, "y": cy, "text": text, "conf": conf})
+            # 会话列表时间在右侧；朋友圈时间戳偏左
+            if cx > self.w * 0.70:
+                continue
+            if cy < self.h * 0.15 or cy > self.h * 0.95:
+                continue
+            posts.append({"x": cx, "y": cy, "text": text, "conf": float(conf)})
 
         posts.sort(key=lambda p: p["y"])
-        return posts
+        # 去重：相近 Y 只留一条
+        dedup = []
+        for p in posts:
+            if not dedup or abs(p["y"] - dedup[-1]["y"]) > 40:
+                dedup.append(p)
+        return dedup
 
     # ================================================================
     # 菜单操作
     # ================================================================
 
     def _open_menu(self, post: dict) -> bool:
-        """点击帖子的 '...' 并验证菜单弹出。支持偏移重试。"""
-        x_base = post["x"] + int(self.w * self.DOTS_X_RATIO)
+        """点击帖子的 '...' 并验证菜单弹出。支持多 X 比例 + 偏移重试。"""
         y_base = post["y"]
+        y_offsets = (0, 4, -4, 8, -8, 12, -12)
+        attempt = 0
 
-        offsets = [
-            (0, 0), (5, 0), (-5, 0), (0, 3), (0, -3),
-            (-10, 0), (-15, 0), (5, 3), (-10, -3),
-        ]
-
-        for dx, dy in offsets[:self.MENU_RETRY]:
-            x, y = x_base + dx, y_base + dy
-            self.d.click(x, y)
-            time.sleep(0.6)
-
-            if self._check_menu_open(post["y"]):
-                return True
+        for rx in self.DOTS_X_RATIOS:
+            x_base = int(self.w * rx)
+            for dy in y_offsets:
+                if attempt >= self.MENU_RETRY:
+                    break
+                attempt += 1
+                x, y = x_base, y_base + dy
+                if y < 0 or y >= self.h:
+                    continue
+                self.d.click(x, y)
+                time.sleep(0.55)
+                if self._check_menu_open(post["y"]):
+                    logger.debug(f"[{self.account_id}] 菜单打开 @({x},{y})")
+                    return True
 
         logger.warning(f"[{self.account_id}] 菜单未弹出")
         return False

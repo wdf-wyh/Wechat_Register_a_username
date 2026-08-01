@@ -64,22 +64,28 @@ class DeviceManager:
             ConnectionError: 连接失败
         """
         logger.info(f"正在连接设备 {serial} ...")
-        try:
-            d = u2.connect(serial)
-            # 验证 ATX agent 是否正常运行
-            info = d.info
-            if not info:
-                raise ConnectionError(f"设备 {serial} 返回空 info")
-            logger.info(
-                f"设备 {serial} 连接成功: "
-                f"{info.get('productName', 'Unknown')} "
-                f"({info.get('displayWidth', '?')}x{info.get('displayHeight', '?')})"
-            )
-            self.devices[serial] = d
-            return d
-        except Exception as e:
-            logger.error(f"连接设备 {serial} 失败: {e}")
-            raise ConnectionError(f"无法连接设备 {serial}: {e}")
+        last_err: Exception | None = None
+        for attempt in range(1, 4):
+            try:
+                d = u2.connect(serial)
+                # 验证 ATX agent 是否正常运行（偶发 RemoteDisconnected，重试）
+                info = d.info
+                if not info:
+                    raise ConnectionError(f"设备 {serial} 返回空 info")
+                logger.info(
+                    f"设备 {serial} 连接成功: "
+                    f"{info.get('productName', 'Unknown')} "
+                    f"({info.get('displayWidth', '?')}x{info.get('displayHeight', '?')})"
+                )
+                self.devices[serial] = d
+                return d
+            except Exception as e:
+                last_err = e
+                logger.warning(f"连接设备 {serial} 第{attempt}次失败: {e}")
+                import time
+                time.sleep(1.5 * attempt)
+        logger.error(f"连接设备 {serial} 失败: {last_err}")
+        raise ConnectionError(f"无法连接设备 {serial}: {last_err}")
 
     def discover_and_connect_all(self) -> dict[str, u2.Device]:
         """
@@ -197,22 +203,15 @@ class DeviceManager:
             return False
 
         try:
-            # 唤醒屏幕并尝试上滑解锁
-            d.screen_on()
-            import time
-            time.sleep(0.3)
-            # 尝试上滑解锁（无密码情况下）
-            w = d.info['displayWidth']
-            h = d.info['displayHeight']
-            d.swipe(w // 2, int(h * 0.85), w // 2, int(h * 0.2), duration=0.3)
-            time.sleep(1)
+            from core.wechat_nav import start_wechat
 
             current = d.app_current()
-            if current.get("package") != settings.WECHAT_PACKAGE:
-                logger.info(f"设备 {serial}: 微信未在前台，正在启动...")
-                d.app_start(settings.WECHAT_PACKAGE)
-                time.sleep(settings.WECHAT_LAUNCH_WAIT)
-            return True
+            if current.get("package") == settings.WECHAT_PACKAGE:
+                return True
+            logger.info(f"设备 {serial}: 微信未在前台，正在启动...")
+            return start_wechat(
+                d, wait=settings.WECHAT_LAUNCH_WAIT, cold=False
+            )
         except Exception as e:
             logger.error(f"设备 {serial} 启动微信失败: {e}")
             return False

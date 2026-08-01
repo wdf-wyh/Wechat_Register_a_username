@@ -100,20 +100,16 @@ class PublicAccountBrowser:
 
     def _open_public_accounts(self):
         """全局搜索'公众号' → 点击进入。"""
-        d, w, h = self.d, self.w, self.h
+        from core.wechat_nav import goto_tab, open_search, ocr_find_and_click, start_wechat
 
-        d.screen_on()
-        time.sleep(0.3)
-        d.swipe(w // 2, int(h * 0.85), w // 2, int(h * 0.2), duration=0.3)
-        time.sleep(0.5)
-        d.app_stop("com.tencent.mm")
-        time.sleep(1)
-        d.app_start("com.tencent.mm")
-        time.sleep(5)
-        d.click(int(w * 0.125), int(h * 0.955))  # 微信tab
-        time.sleep(2)
-        d.click(1050, 150)                         # 搜索
-        time.sleep(2)
+        d, w, h = self.d, self.w, self.h
+        start_wechat(d, wait=4.0, cold=True)
+        goto_tab(d, "wechat")
+
+        if not open_search(d):
+            d.click(int(w * 0.831), int(h * 0.054))
+            time.sleep(2)
+
         d.click(int(w * 0.5), int(h * 0.045))
         time.sleep(0.8)
 
@@ -124,27 +120,26 @@ class PublicAccountBrowser:
             time.sleep(0.5)
             d.set_input_ime(False)
         except Exception:
-            d.shell("input text 公众号")
+            try:
+                d(focused=True).set_text("公众号")
+            except Exception:
+                pass
 
         d.press("enter")
         time.sleep(2)
 
-        # OCR 找"公众号"
-        img = np.array(d.screenshot(format="pillow"))
-        gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-        results = self._get_ocr().readtext(
-            cv2.cvtColor(self._enhance(gray), cv2.COLOR_GRAY2BGR))
-
-        for bbox, text, conf in results:
-            if text.strip() == "公众号" and conf > 0.5:
-                cy = int((bbox[0][1] + bbox[2][1]) / 2)
-                if cy > 250:
-                    cx = min(int((bbox[0][0]+bbox[2][0])/2) + 200, w - 50)
-                    d.click(cx, cy)
-                    break
-        else:
-            d.click(500, 540)
-
+        clicked = ocr_find_and_click(
+            d,
+            self._get_ocr(),
+            ["公众号"],
+            y_min_ratio=0.12,
+            y_max_ratio=0.85,
+            conf_min=0.4,
+            enhance=self._enhance,
+            exact=False,
+        )
+        if not clicked:
+            d.click(int(w * 0.40), int(h * 0.22))
         time.sleep(3)
 
     # ================================================================
@@ -166,7 +161,7 @@ class PublicAccountBrowser:
                 y0 = int(bbox[0][1])
                 cy = int((bbox[0][1] + bbox[2][1]) / 2)
                 cx = int((bbox[0][0] + bbox[2][0]) / 2)
-                if 350 < y0 < 2200 and len(text.strip()) > 2:
+                if int(h * 0.15) < y0 < int(h * 0.85) and len(text.strip()) > 2:
                     articles.append((cx, cy, text))
 
         if not articles:

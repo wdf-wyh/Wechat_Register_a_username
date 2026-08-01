@@ -25,18 +25,12 @@ logger = get_logger("search_helper")
 class SearchHelper:
     """微信全局搜索器。"""
 
-    # 搜索图标候选位置（紧挨"+"按钮右侧，与朋友圈相机位置相近）
-    SEARCH_CANDIDATES = [
-        (0.831, 0.054),   # (1050, 150) — 主位置
-        (0.820, 0.054),   # (1036, 150)
-        (0.845, 0.054),   # (1068, 150)
-        (0.855, 0.052),   # (1080, 145)
-    ]
-
     def __init__(self, d, account_id: str = ""):
         self.d = d
         self.account_id = account_id
         self.w, self.h = d.info['displayWidth'], d.info['displayHeight']
+        from core.wechat_nav import search_icon_candidates_for
+        self.SEARCH_CANDIDATES = search_icon_candidates_for(d)
 
     # ================================================================
     # 公共接口
@@ -90,20 +84,11 @@ class SearchHelper:
 
     def _goto_wechat_home(self):
         """冷启动微信 → 微信 Tab。"""
+        from core.wechat_nav import goto_tab, start_wechat
+
         logger.debug(f"[{self.account_id}] 导航到微信首页")
-        d, w, h = self.d, self.w, self.h
-
-        d.screen_on()
-        time.sleep(0.3)
-        d.swipe(w // 2, int(h * 0.85), w // 2, int(h * 0.2), duration=0.3)
-        time.sleep(0.5)
-        d.app_stop("com.tencent.mm")
-        time.sleep(1)
-        d.app_start("com.tencent.mm")
-        time.sleep(5)
-
-        d.click(int(w * 0.125), int(h * 0.955))  # 微信 Tab
-        time.sleep(2)
+        start_wechat(self.d, wait=4.0, cold=True)
+        goto_tab(self.d, "wechat")
 
     # ================================================================
     # 点击搜索图标
@@ -111,30 +96,11 @@ class SearchHelper:
 
     def _click_search_icon(self):
         """多位置重试点击搜索图标，用页面差异验证。"""
+        from core.wechat_nav import open_search
+
         logger.debug(f"[{self.account_id}] 点击搜索图标")
-        d, w, h = self.d, self.w, self.h
-
-        img_before = np.array(d.screenshot(format="pillow"))
-        gray_before = cv2.cvtColor(img_before, cv2.COLOR_RGB2GRAY)
-
-        for rx, ry in self.SEARCH_CANDIDATES:
-            cx, cy = int(w * rx), int(h * ry)
-            d.click(cx, cy)
-            time.sleep(2)
-
-            img_after = np.array(d.screenshot(format="pillow"))
-            gray_after = cv2.cvtColor(img_after, cv2.COLOR_RGB2GRAY)
-            diff = np.mean(cv2.absdiff(
-                gray_after.astype(np.int16), gray_before.astype(np.int16)))
-
-            if diff > 10:
-                logger.debug(f"[{self.account_id}] 搜索页打开 ({cx},{cy}) diff={diff:.0f}")
-                return
-
-            d.press("back")
-            time.sleep(0.5)
-
-        raise RuntimeError("所有位置均未能打开搜索页")
+        if not open_search(self.d):
+            raise RuntimeError("所有位置均未能打开搜索页")
 
     # ================================================================
     # 输入关键词 + 搜索
