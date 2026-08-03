@@ -8,7 +8,7 @@
     - 浏览收藏夹
 """
 
-from scripts.base_script import BaseScript, ActionType, Action, DailyScript
+from scripts.base_script import BaseScript, ActionType, Action, DailyScript, channels_daily_params
 
 
 class LightInteractScript(BaseScript):
@@ -31,8 +31,9 @@ class LightInteractScript(BaseScript):
                 Action(ActionType.SEND_MESSAGE, "09:30", "11:00", (120, 300),
                        params={"contact_count": (1, 2)}),
                 Action(ActionType.SEND_EMOJI, "09:30", "11:00", (30, 60)),
-                # 12:00 - 刷视频号
-                Action(ActionType.SCROLL_CHANNELS, "11:30", "13:00", (600, 900)),
+                # 12:00 - 视频号约 10 分钟（完播 + 评论）
+                Action(ActionType.SCROLL_CHANNELS, "11:30", "13:00", (600, 720),
+                       params=channels_daily_params(600)),
                 # 12:30 - 阅读公众号
                 Action(ActionType.READ_ARTICLE, "12:00", "13:30", (300, 600)),
                 Action(ActionType.FAVORITE_ARTICLE, "12:30", "13:30", (30, 120)),
@@ -40,15 +41,19 @@ class LightInteractScript(BaseScript):
                 Action(ActionType.GLOBAL_SEARCH, "13:30", "15:00", (60, 180)),
                 # 15:00 - 与好友聊天（图片分享）
                 Action(ActionType.SEND_IMAGE, "14:30", "16:00", (60, 180)),
+                Action(ActionType.BROWSE_MINI_PROGRAM, "15:00", "16:00", (90, 180),
+                       params={"duration": 150}),
                 Action(ActionType.BROWSE_FAVORITES, "15:30", "17:00", (120, 300)),
                 # 17:00 - 打开支付页面
                 Action(ActionType.MAKE_PAYMENT, "16:30", "18:00", (60, 300)),
+                # 18:30 - 深聊一轮
+                Action(ActionType.DEEP_CHAT, "17:30", "19:00", (300, 420),
+                       params={"rounds": 4, "duration": 280}),
                 # 19:00 - 刷朋友圈 + 评论
                 Action(ActionType.SCROLL_MOMENTS, "18:30", "20:00", (300, 600)),
                 Action(ActionType.COMMENT_MOMENT, "19:00", "20:00", (30, 120)),
-                # 21:00 - 刷视频号 + 点赞
-                Action(ActionType.SCROLL_CHANNELS, "20:30", "22:00", (300, 600)),
-                Action(ActionType.LIKE_CHANNEL, "21:00", "22:00", (30, 60)),
+                Action(ActionType.GROUP_CHAT, "19:30", "20:30", (60, 120),
+                       params={"count": 2}),
                 # 22:00 - 睡前刷朋友圈
                 Action(ActionType.SCROLL_MOMENTS, "21:30", "22:30", (180, 480)),
                 # 23:00-07:00 - 不活跃
@@ -73,9 +78,9 @@ class LightInteractScript(BaseScript):
                 Action(ActionType.SEND_MESSAGE, "11:00", "13:00", (120, 300),
                        params={"contact_count": (1, 2)}),
                 Action(ActionType.SEND_EMOJI, "11:30", "13:00", (30, 60)),
-                # 14:00 - 刷视频号
-                Action(ActionType.SCROLL_CHANNELS, "13:00", "15:00", (600, 1200)),
-                Action(ActionType.LIKE_CHANNEL, "14:00", "15:00", (30, 60)),
+                # 14:00 - 视频号约 10 分钟（完播 + 评论）
+                Action(ActionType.SCROLL_CHANNELS, "13:00", "15:00", (600, 720),
+                       params=channels_daily_params(600)),
                 # 15:30 - 阅读文章
                 Action(ActionType.READ_ARTICLE, "15:00", "17:00", (300, 600)),
                 Action(ActionType.FAVORITE_ARTICLE, "15:30", "17:00", (30, 120)),
@@ -87,8 +92,6 @@ class LightInteractScript(BaseScript):
                 # 20:00 - 刷朋友圈 + 评论
                 Action(ActionType.SCROLL_MOMENTS, "19:30", "21:00", (300, 900)),
                 Action(ActionType.COMMENT_MOMENT, "20:00", "21:00", (30, 120)),
-                # 22:00 - 刷视频号
-                Action(ActionType.SCROLL_CHANNELS, "21:00", "23:00", (300, 600)),
                 # 23:30 - 睡前朋友圈
                 Action(ActionType.SCROLL_MOMENTS, "22:30", "23:59", (180, 480)),
                 # 00:00-08:00 - 不活跃

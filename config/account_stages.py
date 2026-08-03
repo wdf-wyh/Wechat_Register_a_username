@@ -2,8 +2,8 @@
 账号阶段定义 — 各养号阶段的参数配置与限量规则。
 
 各阶段说明:
-    trust_building  — 信任积累期（第1-2周）：只看不发
-    light_interact  — 轻度互动期（第3-4周）：开始互动
+    trust_building  — 信任积累期（第1-2周）：14 天冷启动分相位（见 cold_start_templates）
+    light_interact  — 轻度互动期（第3-4周）：开始稳定互动
     normal_use      — 正常使用期（第2-3个月）：正常社交
     mature          — 成熟期（3个月后）：可投入测试
 """
@@ -21,29 +21,29 @@ class AccountStage(Enum):
 
 # 各阶段时长定义（天）
 STAGE_DURATION_DAYS = {
-    AccountStage.TRUST_BUILDING: 14,    # 2 周
+    AccountStage.TRUST_BUILDING: 14,    # 2 周（冷启动黄金期）
     AccountStage.LIGHT_INTERACT: 14,    # 2 周
     AccountStage.NORMAL_USE: 60,        # 约 2 个月
     # 之后自动进入 MATURE
 }
 
-# 各阶段每日操作限量
+# 各阶段每日操作限量（上限；具体日节奏由剧本/AI 再细分）
 STAGE_CONFIGS = {
     AccountStage.TRUST_BUILDING: {
         "name": "信任积累期",
-        "daily_add_friends": 0,              # 不加好友
-        "weekly_post_moments": 0,            # 不发朋友圈
-        "daily_chat_contacts": 0,            # 不主动聊天
-        "daily_payments": 1,                 # 小额支付1次
-        "daily_scroll_moments_min": 15,      # 刷朋友圈不低于15分钟
-        "voice_call_weekly": 0,              # 不打电话
-        "description": "只看不互动，建立基础信任",
+        "daily_add_friends": 3,              # Day8+ 才用到；前期模板硬限为 0
+        "weekly_post_moments": 3,            # Day4+ 才发圈
+        "daily_chat_contacts": 5,
+        "daily_payments": 1,                 # 仅打开支付页，非真实交易
+        "daily_scroll_moments_min": 15,
+        "voice_call_weekly": 0,
+        "description": "14天冷启动：先基建消费，中后期轻互动",
     },
     AccountStage.LIGHT_INTERACT: {
         "name": "轻度互动期",
         "daily_add_friends": 2,
-        "weekly_post_moments": 3,
-        "daily_chat_contacts": 2,
+        "weekly_post_moments": 4,
+        "daily_chat_contacts": 3,
         "daily_payments": 2,
         "daily_scroll_moments_min": 10,
         "voice_call_weekly": 1,
@@ -52,12 +52,12 @@ STAGE_CONFIGS = {
     AccountStage.NORMAL_USE: {
         "name": "正常使用期",
         "daily_add_friends": 5,
-        "weekly_post_moments": 7,
+        "weekly_post_moments": 6,
         "daily_chat_contacts": 5,
         "daily_payments": 3,
         "daily_scroll_moments_min": 5,
         "voice_call_weekly": 3,
-        "description": "模拟正常用户社交频率",
+        "description": "模拟正常用户社交频率（约每周4-6条朋友圈）",
     },
     AccountStage.MATURE: {
         "name": "成熟期",

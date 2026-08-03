@@ -28,7 +28,7 @@
 | 定位 | EasyOCR + OpenCV + 百分比坐标 fallback |
 | 调度 | Python asyncio / Cron |
 | 数据 | SQLite |
-| LLM | DeepSeek API（可选，生成文案和话术） |
+| LLM | DeepSeek API（文案话术 + **AI 上帝视角编排当日剧本**） |
 
 ---
 
@@ -49,12 +49,14 @@ wechat_farm/
 │   ├── public_account_browser.py  # 浏览公众号
 │   ├── favorites_browser.py # 浏览收藏夹
 │   ├── search_helper.py     # 全局搜索
+│   ├── social_actions.py    # 关注公众号/加好友/群聊深聊/小程序
 │   ├── humanizer.py         # 拟人化引擎
 │   ├── device.py            # 设备管理
 │   └── element_locator.py   # 元素定位辅助
 ├── scripts/                 # 行为剧本
-│   ├── base_script.py       # 基类 (ActionType 枚举 + handler 映射)
-│   ├── trust_building.py    # 信任积累期 (第 1-2 周)
+│   ├── base_script.py       # 基类 (ActionType 枚举 + handler 映射 + AI 编排入口)
+│   ├── cold_start_templates.py  # 新号 14 天冷启动规则模板
+│   ├── trust_building.py    # 信任积累期 (第 1-2 周，按注册日分相位)
 │   ├── light_interact.py    # 轻度互动期 (第 3-4 周)
 │   ├── normal_use.py        # 正常使用期 (第 2-3 月)
 │   ├── mature.py            # 成熟期 (3 个月后)
@@ -62,7 +64,10 @@ wechat_farm/
 ├── scheduler/               # 调度层
 ├── monitor/                 # 健康检查 (18 项)
 ├── storage/                 # SQLite 数据库
-├── content/                 # 文案模板 + LLM 客户端
+├── content/                 # 文案模板 + LLM 客户端 + AI 上帝视角
+│   ├── llm_client.py        # 文案/评论/深聊/当日剧本 JSON
+│   ├── ai_god_planner.py    # ← 上帝视角编排器（上下文→LLM→安全 clamp）
+│   └── personas.py          # 人设（含 seed_friends/groups/public_accounts）
 └── utils/                   # 日志、ADB 工具
 ```
 
@@ -102,7 +107,7 @@ wc.browse_moments_interact(300, "哈哈", 0.55)   # 浏览 5min 随机互动
 wc.post_moment("文案", image_count=3)           # 发朋友圈 3 张图
 wc.send_message("你好", contact="张三")         # 发文字
 wc.global_search("天气")                       # 全局搜索
-wc.scroll_channels(20, like_rate=0.2)           # 刷视频号 20 条
+wc.scroll_channels(duration_seconds=600, finish_watch=True, comment_rate=0.18)  # 视频号约10分钟完播+评论
 wc.browse_favorites(120)                       # 浏览收藏夹 2min
 ```
 
@@ -212,14 +217,42 @@ print(resolve_profile(d).display_name)
 
 | 阶段 | 时长 | 核心行为 | 剧本文件 |
 |------|------|---------|---------|
-| 信任积累期 | 第 1-2 周 | 刷朋友圈、看视频号、读文章、搜索、支付。**不互动** | `trust_building.py` |
-| 轻度互动期 | 第 3-4 周 | 开始聊天、点赞、发圈 2-3 条/周 | `light_interact.py` |
+| 信任积累期 | 第 1-2 周 | **14 天冷启动分相位**（见下） | `trust_building.py` + `cold_start_templates.py` |
+| 轻度互动期 | 第 3-4 周 | 开始聊天、点赞、发圈、深聊、小程序 | `light_interact.py` |
 | 正常使用期 | 第 2-3 月 | 正常社交频率，全面互动 | `normal_use.py` |
 | 成熟期 | 3 个月后 | 自然维持，可投入测试 | `mature.py` |
 
-每个剧本里定义了动作类型 + 时间窗口 + 持续时长，脚本自己会在时间窗口内随机选取执行时间。
+### 5.1 新号 14 天冷启动相位（trust_building）
 
-**阶段推进逻辑**：`python main.py advance` 根据 `registration_date` 计算天数：
+| 天 | 相位 | 自动化内容 | 跳过（人工） |
+|----|------|-----------|-------------|
+| 1-3 | 社交种子 | 关注公众号、读文、搜索、视频号、小程序、打开支付页 | 头像/昵称/绑卡/红包/线下消费 |
+| 4-7 | 内容生态 | 发圈、群发言、轻点赞、小程序 | 跳一跳需额外适配 |
+| 8-10 | 深度互动 | 限量加好友、深聊、朋友圈高频互动 | 需预填 `seed_friends` |
+| 11-14 | 场景渗透 | 视频号加长+评论、小程序、继续互动 | 真实电商下单 |
+
+人设种子字段（`content/personas.py`）:
+- `public_accounts` — 关注目标
+- `seed_friends` — 可搜索添加的微信号/昵称（空则跳过加好友）
+- `seed_groups` — 群名（也可把群写入 DB `friends.source='group'`）
+
+### 5.2 AI 上帝视角编排
+
+默认开启（`settings.USE_AI_GOD_PLANNER=True`，可用环境变量关闭）。
+
+流程：
+1. `BaseScript.run_daily` → `AiGodPlanner.plan_day`
+2. 汇总注册天数 / 健康状态 / 今日统计 / 近期失败 / 硬限
+3. LLM 输出当日 `actions` JSON
+4. **安全 clamp**：剔除人工动作、夜间操作、超阶段上限；`consume_only` 只留浏览类
+5. LLM 不可用或解析失败 → 回退 `cold_start_templates`
+
+```bash
+# 关闭 AI 编排，只用规则模板
+set USE_AI_GOD_PLANNER=0
+```
+
+阶段推进逻辑：`python main.py advance` 根据 `registration_date` 计算天数：
 - `0~14 天` → trust_building
 - `15~28 天` → light_interact
 - `29~88 天` → normal_use
@@ -314,9 +347,12 @@ UPDATE accounts SET state='cooldown', mode='consume_only' WHERE id='acc_xxx';
 ## 八、环境变量
 
 ```bash
-# LLM API（可选，不设置则用本地模板库）
+# LLM API（可选，不设置则用本地模板库 + 规则剧本）
 export LLM_API_KEY=sk-xxxxxxxx
 export LLM_BASE_URL=https://api.deepseek.com
+
+# AI 上帝视角编排（默认开启；0/false 关闭）
+export USE_AI_GOD_PLANNER=1
 
 # 钉钉告警（可选）
 export DINGTALK_WEBHOOK=https://oapi.dingtalk.com/robot/send?access_token=xxx
@@ -346,5 +382,6 @@ export DINGTALK_WEBHOOK=https://oapi.dingtalk.com/robot/send?access_token=xxx
 
 ---
 
-> **项目版本**: v2.3 | **更新**: 2026-07-23
+> **项目版本**: v2.4 | **更新**: 2026-08-03
 > **详细方案**: 参见 `../具体执行方案.md`
+> **本版新增**: 14 天冷启动分相位剧本、社交扩展动作、AI 上帝视角编排器

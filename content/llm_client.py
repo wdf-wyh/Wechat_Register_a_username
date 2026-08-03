@@ -28,6 +28,8 @@ from openai import OpenAI
 from config.settings import settings
 from utils.logger import get_logger
 
+import json
+
 logger = get_logger("llm_client")
 
 
@@ -148,6 +150,95 @@ class LLMClient:
 """
         text = self._call_api(prompt, temperature=0.8, max_tokens=80)
         return text
+
+    # ================================================================
+    # 深聊多轮 / 上帝视角编排
+    # ================================================================
+
+    def generate_deep_chat_turns(
+        self,
+        persona: dict,
+        contact: str = "朋友",
+        rounds: int = 5,
+    ) -> list[str]:
+        """生成多轮连续聊天内容（JSON 数组）。"""
+        prompt = f"""你正在模拟微信用户与「{contact}」的一段自然聊天。
+
+个人画像：
+- 年龄：{persona.get('age', '25-35')}
+- 城市：{persona.get('city', '北京')}
+- 兴趣：{', '.join(persona.get('hobbies', ['日常']))}
+- 风格：{persona.get('comment_style', '自然随意')}
+
+请生成 {rounds} 条连续发送的消息，像真人断续聊天（不是一口气长文）。
+只输出 JSON 数组，例如：["早啊", "今天好忙", "晚上有空吗"]
+要求：每条 5-40 字，口语化，不用句号结尾。
+"""
+        raw = self._call_api(prompt, temperature=0.9, max_tokens=400)
+        if not raw:
+            return []
+        import json
+        import re
+        try:
+            return [str(x) for x in json.loads(raw) if str(x).strip()]
+        except Exception:
+            pass
+        m = re.search(r"\[[\s\S]*\]", raw)
+        if m:
+            try:
+                return [str(x) for x in json.loads(m.group(0)) if str(x).strip()]
+            except Exception:
+                pass
+        # 按行兜底
+        lines = [ln.strip("- •\t ") for ln in raw.splitlines() if ln.strip()]
+        return lines[:rounds]
+
+    def plan_daily_nurture(self, context: dict, persona: dict) -> str:
+        """
+        上帝视角：根据账号上下文输出当日养号动作 JSON。
+
+        Returns:
+            LLM 原始文本（期望含 actions 数组）
+        """
+        prompt = f"""你是微信养号系统的「上帝视角」调度器。根据账号状态编排**今天**的自动化动作。
+
+## 账号上下文
+{json.dumps(context, ensure_ascii=False, indent=2)}
+
+## 人设
+- 名称：{persona.get('name', '普通用户')}
+- 年龄：{persona.get('age')}
+- 城市：{persona.get('city')}
+- 兴趣：{', '.join(persona.get('hobbies', []))}
+- 日常节奏：{persona.get('daily_routine', '')}
+
+## 硬性规则（必须遵守）
+1. 只能使用 allowed_actions 中的动作 type
+2. 禁止 manual_forbidden 中的人工动作
+3. 遵守 hard_limits 当日上限（超过的不要排）
+4. 活跃时间仅 07:00-23:00；必须包含一条 sleep
+5. 新号前期（day1_3）不要加好友、发圈、深聊、群聊、点赞评论
+6. 动作数量建议 8-14 个，时间窗不要全部重叠在同一小时
+7. 如果 mode=consume_only 或 state=cooldown，只排浏览类（刷朋友圈/视频号/读文章/搜索/收藏/小程序/打开支付页）；视频号 params 须 comment_rate=0
+8. 如果 recent_fails 里某动作连续失败，今天减少或避开该动作
+9. 视频号 scroll_channels 每日合计约 10 分钟：params 建议 {{"duration": 600, "finish_watch": true, "like_rate": 0.2, "comment_rate": 0.18}}（前期 day1_3 的 comment_rate 用 0）
+
+## 输出格式
+只输出 JSON（不要 markdown）：
+{{
+  "phase": "day1_3|day4_7|day8_10|day11_14|post_14",
+  "rationale": "一句话说明今天策略",
+  "actions": [
+    {{
+      "type": "scroll_moments",
+      "window": ["08:00", "09:00"],
+      "duration": [300, 600],
+      "params": {{}}
+    }}
+  ]
+}}
+"""
+        return self._call_api(prompt, temperature=0.55, max_tokens=1800)
 
     # ================================================================
     # 内部方法

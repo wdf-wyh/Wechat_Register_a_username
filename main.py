@@ -239,6 +239,20 @@ async def cmd_fast_debug(args):
 
 
 # ================================================================
+# 命令：enterprise-smoke — 企业级真机冒烟
+# ================================================================
+
+async def cmd_enterprise_smoke(args):
+    """企业级真机冒烟：冷启动编排 + 新社交动作 + 机型匹配"""
+    from scripts.enterprise_smoke import run_enterprise_smoke
+
+    serial = getattr(args, "serial", None)
+    result = await run_enterprise_smoke(serial=serial)
+    if not result.get("ok"):
+        raise SystemExit(1)
+
+
+# ================================================================
 # 命令：run — 生产运行
 # ================================================================
 
@@ -487,6 +501,13 @@ def main():
     # fast-debug
     p_fast = subparsers.add_parser("fast-debug", help="快速调试模式（3分钟浓缩剧本）")
 
+    # enterprise-smoke
+    p_ent = subparsers.add_parser(
+        "enterprise-smoke",
+        help="企业级真机冒烟（冷启动/新动作/机型匹配）",
+    )
+    p_ent.add_argument("--serial", default=None, help="指定设备序列号")
+
     # run
     p_run = subparsers.add_parser("run", help="生产模式（全部设备）")
 
@@ -519,6 +540,8 @@ def main():
         asyncio.run(cmd_debug(args))
     elif args.command == "fast-debug":
         asyncio.run(cmd_fast_debug(args))
+    elif args.command == "enterprise-smoke":
+        asyncio.run(cmd_enterprise_smoke(args))
     elif args.command == "run":
         asyncio.run(cmd_run(args))
     elif args.command == "status":

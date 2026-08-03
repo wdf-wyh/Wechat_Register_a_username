@@ -72,6 +72,13 @@ class DeviceManager:
                 info = d.info
                 if not info:
                     raise ConnectionError(f"设备 {serial} 返回空 info")
+                # 冻结竖屏，避免养号过程中微信短暂横屏闪切
+                try:
+                    from core.wechat_nav import lock_portrait
+
+                    lock_portrait(d)
+                except Exception as e:
+                    logger.debug(f"设备 {serial} 锁定竖屏失败(可忽略): {e}")
                 logger.info(
                     f"设备 {serial} 连接成功: "
                     f"{info.get('productName', 'Unknown')} "

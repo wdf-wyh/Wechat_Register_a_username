@@ -7,7 +7,7 @@
     - 适合在账号投入 benchmark 测试期间维持热度
 """
 
-from scripts.base_script import BaseScript, ActionType, Action, DailyScript
+from scripts.base_script import BaseScript, ActionType, Action, DailyScript, channels_daily_params
 
 
 class MatureScript(BaseScript):
@@ -31,8 +31,9 @@ class MatureScript(BaseScript):
                 Action(ActionType.SEND_MESSAGE, "09:00", "11:00", (120, 300),
                        params={"contact_count": (1, 3)}),
                 Action(ActionType.SEND_EMOJI, "09:30", "11:00", (30, 60)),
-                # 12:00 - 刷视频号 + 阅读
-                Action(ActionType.SCROLL_CHANNELS, "11:30", "13:00", (300, 600)),
+                # 12:00 - 视频号约 10 分钟（完播 + 评论）+ 阅读
+                Action(ActionType.SCROLL_CHANNELS, "11:30", "13:00", (600, 720),
+                       params=channels_daily_params(600)),
                 Action(ActionType.READ_ARTICLE, "12:00", "13:30", (180, 480)),
                 Action(ActionType.FAVORITE_ARTICLE, "12:30", "13:30", (30, 60)),
                 # 14:00 - 聊天 (图片/语音)
@@ -50,9 +51,6 @@ class MatureScript(BaseScript):
                 Action(ActionType.SCROLL_MOMENTS, "19:30", "21:00", (180, 480)),
                 Action(ActionType.LIKE_MOMENT, "20:00", "21:00", (30, 120),
                        params={"count": (1, 3)}),
-                # 21:30 - 视频号
-                Action(ActionType.SCROLL_CHANNELS, "20:30", "22:30", (180, 480)),
-                Action(ActionType.LIKE_CHANNEL, "21:00", "22:00", (30, 60)),
                 # 22:30 - 睡前
                 Action(ActionType.SCROLL_MOMENTS, "21:30", "23:00", (120, 300)),
                 # 23:00-07:00 - 不活跃
@@ -77,9 +75,9 @@ class MatureScript(BaseScript):
                 Action(ActionType.SEND_MESSAGE, "11:00", "13:00", (120, 360)),
                 Action(ActionType.SEND_EMOJI, "11:30", "13:00", (30, 60)),
                 Action(ActionType.SEND_IMAGE, "12:00", "13:30", (60, 180)),
-                # 14:00 - 视频号
-                Action(ActionType.SCROLL_CHANNELS, "13:00", "16:00", (300, 900)),
-                Action(ActionType.LIKE_CHANNEL, "14:00", "15:30", (30, 90)),
+                # 14:00 - 视频号约 10 分钟（完播 + 评论）
+                Action(ActionType.SCROLL_CHANNELS, "13:00", "16:00", (600, 720),
+                       params=channels_daily_params(600)),
                 # 15:30 - 阅读 + 收藏
                 Action(ActionType.READ_ARTICLE, "15:00", "17:00", (180, 480)),
                 Action(ActionType.FAVORITE_ARTICLE, "15:30", "17:00", (30, 60)),
@@ -91,8 +89,6 @@ class MatureScript(BaseScript):
                 # 19:00 - 朋友圈 + 评论
                 Action(ActionType.SCROLL_MOMENTS, "18:30", "21:00", (180, 480)),
                 Action(ActionType.COMMENT_MOMENT, "19:00", "21:00", (30, 120)),
-                # 21:00 - 视频号
-                Action(ActionType.SCROLL_CHANNELS, "20:00", "22:30", (180, 480)),
                 # 22:30 - 睡前
                 Action(ActionType.SCROLL_MOMENTS, "21:30", "23:30", (120, 300)),
                 # 00:00-08:00 - 不活跃

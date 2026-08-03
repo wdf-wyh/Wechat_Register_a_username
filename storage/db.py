@@ -207,20 +207,70 @@ class Database:
         )
         self.conn.commit()
 
-    def get_friends(self, account_id: str) -> list[dict]:
-        """获取账号好友列表"""
-        rows = self.conn.execute(
-            "SELECT * FROM friends WHERE account_id = ?", (account_id,)
-        ).fetchall()
+    def get_friends(self, account_id: str, source: str = None) -> list[dict]:
+        """获取账号好友列表；source 可选过滤（如 group）。"""
+        if source:
+            rows = self.conn.execute(
+                "SELECT * FROM friends WHERE account_id = ? AND source = ?",
+                (account_id, source),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM friends WHERE account_id = ?", (account_id,)
+            ).fetchall()
         return [dict(r) for r in rows]
 
-    def get_random_friend(self, account_id: str) -> Optional[dict]:
+    def get_random_friend(
+        self,
+        account_id: str,
+        exclude_groups: bool = False,
+    ) -> Optional[dict]:
         """随机获取一个好友"""
-        row = self.conn.execute(
-            "SELECT * FROM friends WHERE account_id = ? ORDER BY RANDOM() LIMIT 1",
-            (account_id,),
-        ).fetchone()
+        if exclude_groups:
+            row = self.conn.execute(
+                """SELECT * FROM friends
+                   WHERE account_id = ? AND IFNULL(source, '') != 'group'
+                   ORDER BY RANDOM() LIMIT 1""",
+                (account_id,),
+            ).fetchone()
+        else:
+            row = self.conn.execute(
+                "SELECT * FROM friends WHERE account_id = ? ORDER BY RANDOM() LIMIT 1",
+                (account_id,),
+            ).fetchone()
         return dict(row) if row else None
+
+    def get_today_stats(self, account_id: str) -> dict:
+        """今日动作成功/失败统计。"""
+        rows = self.conn.execute(
+            """SELECT action_type, success, COUNT(*) AS cnt
+               FROM action_logs
+               WHERE account_id = ? AND date(executed_at)=date('now', 'localtime')
+               GROUP BY action_type, success""",
+            (account_id,),
+        ).fetchall()
+        stats: dict = {"by_action": {}, "fail_total": 0, "ok_total": 0}
+        for r in rows:
+            key = r["action_type"]
+            bucket = stats["by_action"].setdefault(key, {"ok": 0, "fail": 0})
+            if r["success"]:
+                bucket["ok"] += r["cnt"]
+                stats["ok_total"] += r["cnt"]
+            else:
+                bucket["fail"] += r["cnt"]
+                stats["fail_total"] += r["cnt"]
+        return stats
+
+    def get_recent_failed_actions(self, account_id: str, limit: int = 8) -> list[dict]:
+        """最近失败动作列表。"""
+        rows = self.conn.execute(
+            """SELECT action_type, error_msg, executed_at
+               FROM action_logs
+               WHERE account_id = ? AND success = 0
+               ORDER BY executed_at DESC LIMIT ?""",
+            (account_id, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     # ================================================================
     # 朋友圈记录

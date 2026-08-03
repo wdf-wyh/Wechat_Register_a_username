@@ -62,6 +62,47 @@ def window_size(d) -> tuple[int, int]:
         return int(info["displayWidth"]), int(info["displayHeight"])
 
 
+def lock_portrait(d) -> None:
+    """
+    强制竖屏，抑制自动化过程中微信短暂横屏闪切。
+
+    即使系统「自动旋转」已关，ATX/部分 Activity 仍可能改方向；
+    这里同时写 settings + u2 freeze + 设为 natural。
+    """
+    try:
+        d.shell("settings put system accelerometer_rotation 0")
+    except Exception:
+        pass
+    try:
+        d.shell("settings put system user_rotation 0")
+    except Exception:
+        pass
+    try:
+        d.freeze_rotation(True)
+    except Exception:
+        pass
+    try:
+        # natural / n = 竖屏正向
+        d.set_orientation("natural")
+    except Exception:
+        try:
+            d.set_orientation("n")
+        except Exception:
+            pass
+    # 若当前已是横屏（宽>高），再推一次竖屏
+    try:
+        w, h = window_size(d)
+        if w > h:
+            logger.warning(f"检测到横屏 {w}x{h}，强制恢复竖屏")
+            try:
+                d.set_orientation("natural")
+            except Exception:
+                pass
+            time.sleep(0.3)
+    except Exception:
+        pass
+
+
 def click_ratio(d, rx: float, ry: float):
     w, h = window_size(d)
     d.click(int(w * rx), int(h * ry))
@@ -129,6 +170,7 @@ def start_wechat(d, wait: float = 4.0, cold: bool = True) -> bool:
     import subprocess
 
     wake_and_unlock(d)
+    lock_portrait(d)
 
     if cold:
         try:

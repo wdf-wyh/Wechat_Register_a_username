@@ -119,8 +119,13 @@ class FastTestScript(BaseScript):
 
         def _browse_channels():
             browser = ChannelsBrowser(self.wc.d, account_id=self.account_id)
-            # 缩短条数，降低 OCR 卡死与双开打断概率
-            return {"liked": browser.browse(scroll_count=3, like_rate=0.2)}
+            # 冒烟缩短：条数控制，关闭完播与评论
+            return browser.browse(
+                scroll_count=3,
+                like_rate=0.2,
+                finish_watch=False,
+                comment_rate=0.0,
+            )
 
         await step(5, "刷视频号 (3条)", _browse_channels)
 

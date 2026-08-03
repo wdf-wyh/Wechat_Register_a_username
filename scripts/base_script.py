@@ -37,13 +37,19 @@ class ActionType(Enum):
     POST_MOMENT = "post_moment"
     SCROLL_CHANNELS = "scroll_channels"
     LIKE_CHANNEL = "like_channel"
+    COMMENT_CHANNEL = "comment_channel"
     READ_ARTICLE = "read_article"
     FAVORITE_ARTICLE = "favorite_article"
+    FOLLOW_PUBLIC_ACCOUNT = "follow_public_account"
     GLOBAL_SEARCH = "global_search"
     SEND_MESSAGE = "send_message"
     SEND_IMAGE = "send_image"
     SEND_VOICE = "send_voice"
     SEND_EMOJI = "send_emoji"
+    DEEP_CHAT = "deep_chat"
+    GROUP_CHAT = "group_chat"
+    ADD_FRIEND = "add_friend"
+    BROWSE_MINI_PROGRAM = "browse_mini_program"
     MAKE_PAYMENT = "make_payment"
     OPEN_FAVORITES = "open_favorites"
     BROWSE_FAVORITES = "browse_favorites"
@@ -60,6 +66,22 @@ class Action:
     duration_seconds: tuple         # (min, max)
     params: dict = field(default_factory=dict)
     random_offset_minutes: int = 30
+
+
+def channels_daily_params(
+    duration: int = 600,
+    *,
+    comment: bool = True,
+    like_rate: float = 0.2,
+    comment_rate: float = 0.18,
+) -> dict:
+    """每日视频号默认参数：约 10 分钟完播 + 可选评论。"""
+    return {
+        "duration": int(duration),
+        "finish_watch": True,
+        "like_rate": like_rate,
+        "comment_rate": comment_rate if comment else 0.0,
+    }
 
 
 @dataclass
@@ -114,13 +136,19 @@ class BaseScript(ABC):
             ActionType.POST_MOMENT:      self._handle_post_moment,
             ActionType.SCROLL_CHANNELS:  self._handle_scroll_channels,
             ActionType.LIKE_CHANNEL:     self._handle_like_channel,
+            ActionType.COMMENT_CHANNEL:  self._handle_comment_channel,
             ActionType.READ_ARTICLE:     self._handle_read_article,
             ActionType.FAVORITE_ARTICLE: self._handle_favorite_article,
+            ActionType.FOLLOW_PUBLIC_ACCOUNT: self._handle_follow_public_account,
             ActionType.GLOBAL_SEARCH:    self._handle_global_search,
             ActionType.SEND_MESSAGE:     self._handle_send_message,
             ActionType.SEND_IMAGE:       self._handle_send_image,
             ActionType.SEND_VOICE:       self._handle_send_voice,
             ActionType.SEND_EMOJI:       self._handle_send_emoji,
+            ActionType.DEEP_CHAT:        self._handle_deep_chat,
+            ActionType.GROUP_CHAT:       self._handle_group_chat,
+            ActionType.ADD_FRIEND:       self._handle_add_friend,
+            ActionType.BROWSE_MINI_PROGRAM: self._handle_browse_mini_program,
             ActionType.MAKE_PAYMENT:     self._handle_make_payment,
             ActionType.OPEN_FAVORITES:   self._handle_open_favorites,
             ActionType.BROWSE_FAVORITES: self._handle_browse_favorites,
@@ -150,20 +178,20 @@ class BaseScript(ABC):
         """
         执行一天的养号剧本。
 
-        1. 判断工作日/周末 → 选择对应剧本
-        2. 为每个动作生成精确执行时间（时间窗口 + 随机偏移）
-        3. 按时间顺序等待并执行
+        1. 判断工作日/周末
+        2. 优先 AI 上帝视角编排；失败则用子类静态剧本 / 14 天模板
+        3. 为每个动作生成精确执行时间并执行
         """
         is_weekend = datetime.now().weekday() >= 5
-        script = self._build_weekend_script() if is_weekend else self._build_weekday_script()
+        actions = self._resolve_daily_actions(is_weekend)
 
         logger.info(
             f"[{self.account_id}] 开始执行 {self.STAGE_NAME} "
             f"({'周末' if is_weekend else '工作日'}) 剧本, "
-            f"共 {len(script.actions)} 个动作"
+            f"共 {len(actions)} 个动作"
         )
 
-        scheduled = self._schedule_actions(script.actions)
+        scheduled = self._schedule_actions(actions)
         success_count = 0
         fail_count = 0
 
@@ -247,6 +275,24 @@ class BaseScript(ABC):
             f"{success_count} 成功 / {fail_count} 失败"
         )
         return {"success": success_count, "fail": fail_count}
+
+    def _resolve_daily_actions(self, is_weekend: bool) -> list[Action]:
+        """AI 上帝视角优先，否则子类静态剧本。"""
+        from config.settings import settings
+
+        if getattr(settings, "USE_AI_GOD_PLANNER", True):
+            try:
+                from content.ai_god_planner import AiGodPlanner
+
+                planner = AiGodPlanner(self.db, self.persona)
+                planned = planner.plan_day(self.account_id, is_weekend=is_weekend)
+                if planned:
+                    return planned
+            except Exception as e:
+                logger.warning(f"[{self.account_id}] AI 编排失败，回退静态剧本: {e}")
+
+        script = self._build_weekend_script() if is_weekend else self._build_weekday_script()
+        return script.actions
 
     # ================================================================
     # 时间调度
@@ -345,29 +391,68 @@ class BaseScript(ABC):
     def _handle_post_moment(self, params: dict) -> bool:
         """发朋友圈（LLM 优先，模板降级）"""
         text = params.get("text", "")
+        topic = params.get("topic", "日常")
         if not text:
             try:
                 from content.llm_client import LLMClient
-                text = LLMClient().generate_post_text(self.persona)
+                text = LLMClient().generate_post_text(self.persona, topic=topic)
             except Exception:
                 from content.post_templates import PostTemplateManager
                 text = PostTemplateManager().get_random_post(self.persona)
         return self.wc.post_moment(text)
 
     def _handle_scroll_channels(self, params: dict) -> bool:
-        """刷视频号（OCR + 概率点赞）"""
-        from core.channels_browser import ChannelsBrowser
-        times = params.get("times") or self.h.randint(3, 8)
+        """刷视频号：默认约 10 分钟完播观看，可按概率点赞/评论。"""
+        from core.channels_browser import ChannelsBrowser, DEFAULT_DAILY_DURATION
+
+        duration = params.get("duration")
+        times = params.get("times")
+        # 未指定条数时按时长；都未指定则每日默认 10 分钟
+        if duration is None and times is None:
+            duration = DEFAULT_DAILY_DURATION
         like_rate = params.get("like_rate", 0.2)
+        comment_rate = params.get("comment_rate", 0.18)
+        finish_watch = params.get("finish_watch", True)
+        comment_texts = params.get("comment_texts")
+        if not comment_texts:
+            try:
+                from content.llm_client import LLMClient
+                comment_texts = [
+                    LLMClient().generate_comment(self.persona),
+                    self.h.choice(["不错", "学到了", "哈哈哈", "支持", "有意思"]),
+                ]
+            except Exception:
+                comment_texts = None
+
         browser = ChannelsBrowser(self.wc.d, account_id=self.account_id)
-        browser.browse(scroll_count=times, like_rate=like_rate)
-        return True
+        result = browser.browse(
+            scroll_count=times,
+            like_rate=like_rate,
+            duration_seconds=duration,
+            finish_watch=finish_watch,
+            comment_rate=comment_rate,
+            comment_texts=comment_texts,
+        )
+        return result.get("watched", 0) > 0
 
     def _handle_like_channel(self, params: dict) -> bool:
         """点赞视频号"""
         from core.channels_browser import ChannelsBrowser
         browser = ChannelsBrowser(self.wc.d, account_id=self.account_id)
         return browser._like_current()
+
+    def _handle_comment_channel(self, params: dict) -> bool:
+        """视频号评论"""
+        from core.social_actions import SocialActions
+
+        text = params.get("text", "")
+        if not text:
+            try:
+                from content.llm_client import LLMClient
+                text = LLMClient().generate_comment(self.persona)
+            except Exception:
+                text = self.h.choice(["不错", "学到了", "哈哈哈", "支持"])
+        return SocialActions(self.wc.d, self.account_id).comment_channel(text)
 
     def _handle_read_article(self, params: dict) -> bool:
         """阅读公众号文章（OCR 方案）"""
@@ -381,12 +466,40 @@ class BaseScript(ABC):
         """收藏文章"""
         return self.wc.favorite_article()
 
+    def _handle_follow_public_account(self, params: dict) -> bool:
+        """关注行业公众号（名单来自 persona.public_accounts）"""
+        from core.social_actions import SocialActions
+
+        names = params.get("names") or self.persona.get("public_accounts") or []
+        count = params.get("count", 1)
+        if isinstance(count, tuple):
+            count = self.h.randint(*count)
+        if not names:
+            # 无配置时用搜索关键词当公众号名（尽力）
+            from content.search_keywords import SearchKeywordManager
+            names = SearchKeywordManager().get_keywords_batch(count)
+
+        social = SocialActions(self.wc.d, self.account_id)
+        ok = 0
+        for name in names[:count]:
+            if social.follow_public_account(str(name)):
+                ok += 1
+            self.h.random_sleep(2.0, 5.0)
+        return ok > 0
+
     def _handle_global_search(self, params: dict) -> bool:
         """全局搜索"""
         keyword = params.get("keyword", "")
         if not keyword:
             from content.search_keywords import SearchKeywordManager
-            keyword = SearchKeywordManager().get_random_keyword(self.persona)
+            category = params.get("keyword_category")
+            # 兼容模板里的 mini_program 类别名
+            cat_map = {"mini_program": "小程序"}
+            if category in cat_map:
+                category = cat_map[category]
+            keyword = SearchKeywordManager().get_random_keyword(
+                self.persona, category=category
+            )
         return self.wc.global_search(keyword)
 
     def _handle_send_message(self, params: dict) -> bool:
@@ -395,7 +508,7 @@ class BaseScript(ABC):
 
         contact = params.get("contact", "")
         if not contact:
-            friend = self.db.get_random_friend(self.account_id)
+            friend = self.db.get_random_friend(self.account_id, exclude_groups=True)
             if not friend:
                 logger.debug(f"[{self.account_id}] 没有好友可聊天")
                 return True
@@ -425,7 +538,7 @@ class BaseScript(ABC):
 
         contact = params.get("contact", "")
         if not contact:
-            friend = self.db.get_random_friend(self.account_id)
+            friend = self.db.get_random_friend(self.account_id, exclude_groups=True)
             if not friend:
                 logger.debug(f"[{self.account_id}] 没有好友可发送图片")
                 return True
@@ -447,8 +560,145 @@ class BaseScript(ABC):
         """发送表情"""
         return self.wc.send_emoji()
 
+    def _handle_deep_chat(self, params: dict) -> bool:
+        """多轮深度聊天（约 5 分钟）"""
+        from core.social_actions import SocialActions
+
+        contact = params.get("contact", "")
+        if not contact:
+            friend = self.db.get_random_friend(self.account_id, exclude_groups=True)
+            if not friend:
+                # 回退 persona 种子好友
+                seeds = self.persona.get("seed_friends") or []
+                if not seeds:
+                    logger.debug(f"[{self.account_id}] 无好友可深聊，跳过")
+                    return True
+                contact = self.h.choice(seeds)
+            else:
+                contact = friend["friend_name"]
+
+        rounds = params.get("rounds", 5)
+        duration = params.get("duration", 300)
+        messages = params.get("messages") or []
+        if not messages:
+            try:
+                from content.llm_client import LLMClient
+                messages = LLMClient().generate_deep_chat_turns(
+                    self.persona, contact=contact, rounds=rounds
+                )
+            except Exception:
+                messages = []
+        if not messages:
+            from content.chat_templates import ChatTemplateManager
+            mgr = ChatTemplateManager()
+            messages = [
+                mgr.get_random_chat(
+                    self.h.choice(["small_talk", "greeting", "share"]),
+                    self.persona,
+                )
+                for _ in range(rounds)
+            ]
+
+        return SocialActions(self.wc.d, self.account_id).deep_chat(
+            contact=contact,
+            messages=messages,
+            total_seconds=int(duration),
+        )
+
+    def _handle_group_chat(self, params: dict) -> bool:
+        """群聊发言（群名来自 DB source=group 或 persona.seed_groups）"""
+        from core.message_sender import MessageSender
+
+        count = params.get("count", 1)
+        if isinstance(count, tuple):
+            count = self.h.randint(*count)
+
+        groups = self.db.get_friends(self.account_id, source="group")
+        names = [g["friend_name"] for g in groups] if groups else []
+        if not names:
+            names = list(self.persona.get("seed_groups") or [])
+        if not names:
+            logger.debug(f"[{self.account_id}] 无群可发言，跳过")
+            return True
+
+        sender = MessageSender(self.wc.d, account_id=self.account_id)
+        ok = 0
+        for _ in range(count):
+            group = self.h.choice(names)
+            text = params.get("text", "")
+            if not text:
+                try:
+                    from content.llm_client import LLMClient
+                    text = LLMClient().generate_chat_text(
+                        self.persona,
+                        context=f"在群「{group}」里自然发言",
+                        scene="group",
+                    )
+                except Exception:
+                    from content.chat_templates import ChatTemplateManager
+                    text = ChatTemplateManager().get_random_chat(
+                        "small_talk", self.persona
+                    )
+            if sender.send(contact=group, message=text):
+                ok += 1
+            self.h.random_sleep(8.0, 25.0)
+        return ok > 0
+
+    def _handle_add_friend(self, params: dict) -> bool:
+        """加好友（仅 persona.seed_friends / params.targets，严格限流）"""
+        from core.social_actions import SocialActions
+
+        count = params.get("count", 1)
+        if isinstance(count, tuple):
+            count = self.h.randint(*count)
+
+        targets = params.get("targets") or list(self.persona.get("seed_friends") or [])
+        if not targets:
+            logger.debug(f"[{self.account_id}] 无 seed_friends，跳过加好友")
+            return True
+
+        # 过滤已在 DB 中的
+        existing = {f["friend_name"] for f in self.db.get_friends(self.account_id)}
+        targets = [t for t in targets if t not in existing]
+        if not targets:
+            logger.debug(f"[{self.account_id}] seed_friends 均已添加")
+            return True
+
+        social = SocialActions(self.wc.d, self.account_id)
+        ok = 0
+        for target in targets[:count]:
+            source = params.get("source", "seed")
+            if social.add_friend(str(target), remark_source=str(source)):
+                try:
+                    self.db.add_friend(
+                        self.account_id,
+                        str(target),
+                        source=f"active_add:{source}",
+                    )
+                except Exception:
+                    pass
+                ok += 1
+            self.h.random_sleep(15.0, 40.0)
+        return ok > 0
+
+    def _handle_browse_mini_program(self, params: dict) -> bool:
+        """浏览小程序"""
+        from core.social_actions import SocialActions
+        from content.search_keywords import SearchKeywordManager
+
+        duration = params.get("duration", 120)
+        keyword = params.get("keyword", "")
+        if not keyword and params.get("random_keyword", True):
+            keyword = SearchKeywordManager().get_random_keyword(
+                self.persona, category="小程序"
+            )
+        return SocialActions(self.wc.d, self.account_id).browse_mini_program(
+            duration_seconds=int(duration),
+            keyword=keyword,
+        )
+
     def _handle_make_payment(self, params: dict) -> bool:
-        """打开支付页面（模拟支付行为）"""
+        """打开支付页面（模拟支付行为，不完成真实交易）"""
         return self.wc.open_payment_page()
 
     def _handle_open_favorites(self, params: dict) -> bool:

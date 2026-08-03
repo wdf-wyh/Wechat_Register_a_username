@@ -62,6 +62,10 @@ class Settings:
     LLM_TEMPERATURE: float = 0.9
     LLM_MAX_TOKENS: int = 200
 
+    # ===== AI 上帝视角编排 =====
+    USE_AI_GOD_PLANNER: bool = True        # True=LLM 编排当日剧本，失败回退规则模板
+    AI_PLANNER_FALLBACK_TO_TEMPLATE: bool = True
+
     # ===== 监控 =====
     PROMETHEUS_PORT: int = 9090
     HEALTH_CHECK_INTERVAL: float = 3600.0  # 账号健康检查间隔（秒）
@@ -79,6 +83,9 @@ class Settings:
         self.LLM_API_KEY = os.getenv("LLM_API_KEY", self.LLM_API_KEY)
         self.LLM_BASE_URL = os.getenv("LLM_BASE_URL", self.LLM_BASE_URL)
         self.ALERT_DINGTALK_WEBHOOK = os.getenv("DINGTALK_WEBHOOK", self.ALERT_DINGTALK_WEBHOOK)
+        flag = os.getenv("USE_AI_GOD_PLANNER")
+        if flag is not None:
+            self.USE_AI_GOD_PLANNER = flag.strip().lower() in ("1", "true", "yes", "on")
 
 
 # 全局单例

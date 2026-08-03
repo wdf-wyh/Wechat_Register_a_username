@@ -386,24 +386,39 @@ class WeChatControl:
             return True
         return False
 
-    def scroll_channels(self, times: int = None,
-                         like_rate: float = 0.2) -> int:
+    def scroll_channels(
+        self,
+        times: int = None,
+        like_rate: float = 0.2,
+        duration_seconds: int = None,
+        finish_watch: bool = True,
+        comment_rate: float = 0.18,
+        comment_texts: list = None,
+    ) -> dict:
         """
-        刷视频号（OCR + 概率点赞）。
+        刷视频号（默认约 10 分钟完播 + 概率点赞/评论）。
 
         Args:
-            times:     刷几条视频，None 则随机 3~8
-            like_rate: 点赞概率
+            times:             刷几条；与 duration_seconds 二选一
+            like_rate:         点赞概率
+            duration_seconds:  总观看秒数；都未指定时默认 600
+            finish_watch:      尽量完播再切下一条
+            comment_rate:      评论概率
+            comment_texts:     评论文案池
 
         Returns:
-            实际点赞次数
+            {"liked", "commented", "watched", "switched", "elapsed"}
         """
-        if times is None:
-            times = self.h.randint(3, 8)
-
         from core.channels_browser import ChannelsBrowser
         browser = ChannelsBrowser(self.d, account_id=self.account_id)
-        return browser.browse(scroll_count=times, like_rate=like_rate)
+        return browser.browse(
+            scroll_count=times,
+            like_rate=like_rate,
+            duration_seconds=duration_seconds,
+            finish_watch=finish_watch,
+            comment_rate=comment_rate,
+            comment_texts=comment_texts,
+        )
 
     def like_channel_video(self) -> bool:
         """点赞当前视频号视频（OCR 定位图标）"""
