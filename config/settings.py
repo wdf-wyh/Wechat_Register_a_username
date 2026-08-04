@@ -7,8 +7,45 @@
 """
 
 import os
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
+
+
+def _iter_env_candidates(project_root: Path) -> Iterable[Path]:
+    """按优先级返回可加载的 .env 文件列表。"""
+    yield project_root / ".env"
+    env_name = os.getenv("WECHAT_FARM_ENV")
+    if env_name:
+        yield project_root / f".env.{env_name.strip()}"
+
+
+def _load_dotenv_file(project_root: Path) -> None:
+    """
+    从项目根目录加载 .env 文件。
+
+    仅填充当前进程尚未设置的环境变量，保持系统环境变量优先级更高。
+    支持最常见的 KEY=VALUE 格式和可选的引号。
+    """
+    for env_path in _iter_env_candidates(project_root):
+        if not env_path.exists() or not env_path.is_file():
+            continue
+
+        for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip()
+            if not key or key in os.environ:
+                continue
+
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+                value = value[1:-1]
+
+            os.environ[key] = value
 
 
 @dataclass
@@ -23,6 +60,7 @@ class Settings:
     DB_PATH: str = ""
 
     def __post_init__(self):
+        _load_dotenv_file(self.PROJECT_ROOT)
         if not self.DB_PATH:
             self.DB_PATH = str(self.PROJECT_ROOT / "wechat_farm.db")
         # 确保目录存在
@@ -82,6 +120,7 @@ class Settings:
         """从环境变量覆盖配置"""
         self.LLM_API_KEY = os.getenv("LLM_API_KEY", self.LLM_API_KEY)
         self.LLM_BASE_URL = os.getenv("LLM_BASE_URL", self.LLM_BASE_URL)
+        self.LLM_MODEL = os.getenv("LLM_MODEL", self.LLM_MODEL)
         self.ALERT_DINGTALK_WEBHOOK = os.getenv("DINGTALK_WEBHOOK", self.ALERT_DINGTALK_WEBHOOK)
         flag = os.getenv("USE_AI_GOD_PLANNER")
         if flag is not None:

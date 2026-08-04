@@ -31,7 +31,7 @@ STAGE_DURATION_DAYS = {
 STAGE_CONFIGS = {
     AccountStage.TRUST_BUILDING: {
         "name": "信任积累期",
-        "daily_add_friends": 3,              # Day8+ 才用到；前期模板硬限为 0
+        "daily_add_friends": 3,              # 首周绝对天花板；Day1-7 相位硬限为 0
         "weekly_post_moments": 3,            # Day4+ 才发圈
         "daily_chat_contacts": 5,
         "daily_payments": 1,                 # 仅打开支付页，非真实交易

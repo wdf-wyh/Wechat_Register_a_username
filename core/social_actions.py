@@ -31,6 +31,10 @@ class SocialActions:
         self.w, self.h = d.info["displayWidth"], d.info["displayHeight"]
         self._ocr = None
         self._clahe = None
+        # 短时 OCR 缓存：同一页多次判定只扫一次屏
+        self._ocr_blob = ""
+        self._ocr_blob_ts = 0.0
+        self._ocr_blob_ttl = 1.5
 
     # ================================================================
     # 关注公众号
@@ -130,7 +134,7 @@ class SocialActions:
             if not self._input_add_friend_keyword(keyword):
                 save_debug_screenshot(self.d, self.account_id, "add_friend_input_fail")
                 return False
-            time.sleep(2.0)
+            time.sleep(1.0)
 
             # 点搜索结果：查找手机/微信号
             if not self._click_search_user_result(keyword):
@@ -138,19 +142,23 @@ class SocialActions:
                 logger.warning(f"[{self.account_id}] 未点到搜索用户结果: {keyword}")
                 self.d.press("back")
                 return False
-            time.sleep(2.5)
+            time.sleep(1.2)
 
-            # 用户不存在
-            if self._ocr_has_any(["不存在", "无法找到", "找不到", "没有找到", "未找到"]):
+            # 资料页状态：一次 OCR 同时判「不存在 / 已是好友」
+            blob = self._ocr_screen_blob(force=True)
+            if any(
+                k in blob
+                for k in ("不存在", "无法找到", "找不到", "没有找到", "未找到")
+            ):
                 save_debug_screenshot(self.d, self.account_id, "add_friend_not_found")
                 logger.warning(f"[{self.account_id}] 用户不存在或无法搜索: {keyword}")
                 self.d.press("back")
                 return False
 
-            # 已是好友
-            if self._ocr_has_any(["发消息"]) and not self._ocr_has_any(
-                ["添加到通讯录", "加好友", "添加到通讯"]
-            ):
+            has_add = any(
+                k in blob for k in ("添加到通讯录", "加好友", "添加到通讯")
+            )
+            if ("发消息" in blob) and not has_add:
                 logger.info(f"[{self.account_id}] 已是好友: {keyword}")
                 self.d.press("back")
                 return True
@@ -168,12 +176,12 @@ class SocialActions:
                 logger.warning(f"[{self.account_id}] 未点到「发送」: {keyword}")
                 for _ in range(3):
                     self.d.press("back")
-                    time.sleep(0.35)
+                    time.sleep(0.25)
                 return False
 
-            for _ in range(3):
+            for _ in range(2):
                 self.d.press("back")
-                time.sleep(0.35)
+                time.sleep(0.25)
             logger.info(
                 f"[{self.account_id}] 加好友申请已发送: {keyword} remark={remark}"
             )
@@ -204,19 +212,43 @@ class SocialActions:
 
     def _is_friend_request_page(self) -> bool:
         """是否在申请添加朋友页（可点底部发送）。排除「选择标签」子页。"""
-        if self._is_tag_picker_page():
+        blob = self._ocr_screen_blob()
+        if self._blob_is_tag_picker(blob):
             return False
-        return self._ocr_has_any(
-            ["打招呼内容", "添加备注", "申请添加朋友", "朋友验证", "你需要发送验证"]
-        ) and (
-            self._ocr_has_any(["发送", "备注", "标签", "添加图片"])
-        )
+        return self._blob_is_friend_request(blob)
 
     def _is_tag_picker_page(self) -> bool:
         """是否误入申请页里的「选择标签」子页面。"""
-        return self._ocr_has_any(["选择标签", "新建标签", "我的标签"]) and (
-            self._ocr_has_any(["完成", "管理"]) or self._ocr_has_any(["取消"])
+        return self._blob_is_tag_picker(self._ocr_screen_blob())
+
+    @staticmethod
+    def _blob_is_tag_picker(blob: str) -> bool:
+        if not blob:
+            return False
+        return any(k in blob for k in ("选择标签", "新建标签", "我的标签")) and (
+            any(k in blob for k in ("完成", "管理", "取消"))
         )
+
+    @staticmethod
+    def _blob_is_friend_request(blob: str) -> bool:
+        if not blob:
+            return False
+        return any(
+            k in blob
+            for k in (
+                "打招呼内容",
+                "添加备注",
+                "申请添加朋友",
+                "朋友验证",
+                "你需要发送验证",
+            )
+        ) and any(k in blob for k in ("发送", "备注", "标签", "添加图片"))
+
+    def _looks_like_friend_request_fast(self) -> bool:
+        """优先用底部绿钮判断申请页，避免每次全屏 OCR。"""
+        if self._find_green_add_button(y_min=0.78, y_max=0.98):
+            return True
+        return self._is_friend_request_page()
 
     def _leave_tag_picker_if_needed(self) -> None:
         """从标签页返回申请页（点取消，避免点完成改动标签）。"""
@@ -228,11 +260,12 @@ class SocialActions:
                 self.d.press("back")
             except Exception:
                 pass
-        time.sleep(0.6)
+        self._invalidate_ocr_cache()
+        time.sleep(0.35)
 
     def _is_phone_misclick_ui(self) -> bool:
         """是否误点了资料页「电话」行（系统拨号或微信内呼叫面板）。"""
-        if self._is_friend_request_page():
+        if self._looks_like_friend_request_fast():
             return False
         try:
             pkg = (self.d.app_current() or {}).get("package", "") or ""
@@ -260,13 +293,15 @@ class SocialActions:
             return False
         logger.warning(f"[{self.account_id}] 关闭电话操作面板")
         if self._ocr_click_any(["取消"], y_min=0.70, y_max=0.99):
-            time.sleep(0.5)
+            self._invalidate_ocr_cache()
+            time.sleep(0.35)
             return True
         try:
             self.d.press("back")
         except Exception:
             pass
-        time.sleep(0.45)
+        self._invalidate_ocr_cache()
+        time.sleep(0.3)
         return not self._is_phone_misclick_ui()
 
     def _recover_from_phone_misclick(self) -> None:
@@ -284,19 +319,21 @@ class SocialActions:
                 self.d.press("back")
             except Exception:
                 pass
-            time.sleep(0.4)
+            self._invalidate_ocr_cache()
+            time.sleep(0.3)
             if not self._is_phone_misclick_ui():
                 break
 
     def _is_user_profile_page(self) -> bool:
         """是否已在陌生人/好友资料页（可点添加到通讯录或发消息）。"""
-        if self._is_friend_request_page():
+        blob = self._ocr_screen_blob()
+        if self._blob_is_friend_request(blob) and not self._blob_is_tag_picker(blob):
             return False
-        return self._ocr_has_any(
-            ["添加到通讯录", "朋友资料", "发消息", "音视频通话"]
+        return any(
+            k in blob for k in ("添加到通讯录", "朋友资料", "发消息", "音视频通话")
         ) or (
-            self._ocr_has_any(["来源", "来自"])
-            and self._ocr_has_any(["电话", "签名", "地区"])
+            any(k in blob for k in ("来源", "来自"))
+            and any(k in blob for k in ("电话", "签名", "地区"))
         )
 
     def _find_green_add_button(self, y_min: float = 0.36, y_max: float = 0.72):
@@ -345,19 +382,16 @@ class SocialActions:
         """
         资料页点击「添加到通讯录」，并确认进入申请页。
 
-        红米实测：电话行 ~0.29，绿钮 ~0.43。先关电话面板，再点绿钮。
+        速度优先：绿钮 → 机型坐标 → OCR；进页用底部绿钮快判。
         """
         from config.device_profiles import get_extra
         from core.wechat_nav import lock_portrait
 
         lock_portrait(self.d)
 
-        if self._is_friend_request_page():
+        if self._looks_like_friend_request_fast():
             logger.info(f"[{self.account_id}] 已在好友申请页，跳过添加按钮")
             return True
-
-        # 搜索结果误点号码后常留下呼叫面板
-        self._dismiss_phone_action_sheet()
 
         phrases = [
             "添加到通讯录",
@@ -367,12 +401,14 @@ class SocialActions:
         ]
 
         def _after_click_ok() -> bool:
-            time.sleep(1.4)
+            self._invalidate_ocr_cache()
+            time.sleep(0.7)
+            if self._find_green_add_button(y_min=0.36, y_max=0.70):
+                return False
+            if self._looks_like_friend_request_fast():
+                return True
             if self._is_phone_misclick_ui():
                 self._recover_from_phone_misclick()
-                return False
-            if self._is_friend_request_page():
-                return True
             return False
 
         def _try_green() -> bool:
@@ -380,7 +416,6 @@ class SocialActions:
             if not pt:
                 return False
             rx, ry = float(pt[0]), float(pt[1])
-            # 电话行约 0.29，拒绝过靠上的色块
             if ry < 0.36 or ry > 0.70:
                 return False
             click_ratio(self.d, rx, ry)
@@ -391,51 +426,11 @@ class SocialActions:
                 return True
             return False
 
-        # 1) 绿色按钮
+        # 1) 绿色按钮（无 OCR）
         if _try_green():
             return True
 
-        # 2) OCR：y 覆盖实测 0.43，但避开电话行(<0.34)
-        if self._ocr_click_phrase(
-            phrases,
-            y_min=0.36,
-            y_max=0.72,
-            strict=True,
-            avoid_keywords=("电话", "呼叫", "复制", "取消"),
-        ):
-            if _after_click_ok():
-                logger.info(f"[{self.account_id}] OCR 已点「添加到通讯录」")
-                return True
-
-        # 3) 轻微上滑后再找（长资料页）
-        try:
-            self.d.swipe(
-                int(self.w * 0.5),
-                int(self.h * 0.70),
-                int(self.w * 0.5),
-                int(self.h * 0.48),
-                duration=0.28,
-            )
-            time.sleep(0.6)
-        except Exception:
-            pass
-        self._dismiss_phone_action_sheet()
-
-        if _try_green():
-            return True
-
-        if self._ocr_click_phrase(
-            phrases,
-            y_min=0.34,
-            y_max=0.75,
-            strict=True,
-            avoid_keywords=("电话", "呼叫", "复制", "取消"),
-        ):
-            if _after_click_ok():
-                logger.info(f"[{self.account_id}] OCR(滑动后) 已点「添加到通讯录」")
-                return True
-
-        # 4) 坐标：红米绿钮约 0.43；禁止 <0.36（电话区）与盲目偏下
+        # 2) 机型坐标（无 OCR）
         raw = get_extra(
             self.d,
             "add_to_contacts_candidates",
@@ -444,7 +439,6 @@ class SocialActions:
                 (0.50, 0.48),
                 (0.50, 0.40),
                 (0.50, 0.52),
-                (0.50, 0.58),
             ],
         )
         candidates = []
@@ -457,9 +451,9 @@ class SocialActions:
                 continue
             candidates.append((rx, ry))
         if not candidates:
-            candidates = [(0.50, 0.43), (0.50, 0.48), (0.50, 0.52)]
+            candidates = [(0.50, 0.43), (0.50, 0.48)]
 
-        for rx, ry in candidates:
+        for rx, ry in candidates[:3]:
             click_ratio(self.d, rx, ry)
             if _after_click_ok():
                 logger.info(
@@ -467,28 +461,62 @@ class SocialActions:
                 )
                 return True
 
-        return self._is_friend_request_page()
+        # 3) OCR 兜底
+        if self._ocr_click_phrase(
+            phrases,
+            y_min=0.36,
+            y_max=0.72,
+            strict=True,
+            avoid_keywords=("电话", "呼叫", "复制", "取消"),
+        ):
+            if _after_click_ok():
+                logger.info(f"[{self.account_id}] OCR 已点「添加到通讯录」")
+                return True
+
+        try:
+            self.d.swipe(
+                int(self.w * 0.5),
+                int(self.h * 0.70),
+                int(self.w * 0.5),
+                int(self.h * 0.48),
+                duration=0.28,
+            )
+            self._invalidate_ocr_cache()
+            time.sleep(0.4)
+        except Exception:
+            pass
+
+        if _try_green():
+            return True
+        if self._ocr_click_phrase(
+            phrases,
+            y_min=0.34,
+            y_max=0.75,
+            strict=True,
+            avoid_keywords=("电话", "呼叫", "复制", "取消"),
+        ):
+            if _after_click_ok():
+                logger.info(f"[{self.account_id}] OCR(滑动后) 已点「添加到通讯录」")
+                return True
+
+        return self._looks_like_friend_request_fast()
 
     def _submit_friend_request(self, verify_msg: str, remark: str = "") -> bool:
-        """申请页：写备注后点底部绿色「发送」（新版无无右上角发送）。"""
-        from config.device_profiles import get_extra
+        """申请页：写备注后点底部绿色「发送」（新版已无右上角发送）。"""
         from core.wechat_nav import lock_portrait
 
         lock_portrait(self.d)
-        time.sleep(0.8)
-        self._leave_tag_picker_if_needed()
+        time.sleep(0.35)
 
-        if not self._is_friend_request_page():
-            time.sleep(1.2)
+        if not self._looks_like_friend_request_fast():
             self._leave_tag_picker_if_needed()
-            if not self._is_friend_request_page():
+            if not self._looks_like_friend_request_fast():
                 logger.warning(f"[{self.account_id}] 未进入好友申请页，无法发送")
                 return False
 
         if remark:
             ok_remark = self._fill_friend_remark_field(remark)
-            self._leave_tag_picker_if_needed()
-            if ok_remark and self._is_friend_request_page():
+            if ok_remark:
                 logger.info(f"[{self.account_id}] 已写入备注来源: {remark}")
             else:
                 logger.warning(
@@ -497,17 +525,10 @@ class SocialActions:
 
         if verify_msg:
             self._fill_verify_edittext_only(verify_msg)
-            self._leave_tag_picker_if_needed()
 
         self._dismiss_keyboard()
-        time.sleep(0.5)
-        self._leave_tag_picker_if_needed()
+        time.sleep(0.25)
 
-        if not self._is_friend_request_page():
-            logger.warning(f"[{self.account_id}] 收起键盘后离开申请页，放弃发送判定")
-            return False
-
-        # 新版：底部通栏绿钮「发送」；旧版：右上角「发送」
         if self._click_friend_request_send():
             return True
 
@@ -515,26 +536,27 @@ class SocialActions:
         return False
 
     def _click_friend_request_send(self) -> bool:
-        """点击申请页发送：优先底部绿钮，再右上角。"""
+        """点击申请页发送：优先底部绿钮/坐标，OCR 兜底。"""
         from config.device_profiles import get_extra
 
         def _sent_ok() -> bool:
-            time.sleep(1.1)
-            if self._ocr_has_any(["确定", "我知道了", "知道了"]):
+            self._invalidate_ocr_cache()
+            time.sleep(0.55)
+            if not self._find_green_add_button(y_min=0.78, y_max=0.98):
+                blob = self._ocr_screen_blob(force=True)
+                if any(k in blob for k in ("确定", "我知道了", "知道了")):
+                    self._ocr_click_any(
+                        ["确定", "我知道了", "知道了"], y_min=0.4, y_max=0.9
+                    )
+                return True
+            blob = self._ocr_screen_blob(force=True)
+            if any(k in blob for k in ("确定", "我知道了", "知道了")):
                 self._ocr_click_any(
                     ["确定", "我知道了", "知道了"], y_min=0.4, y_max=0.9
                 )
                 return True
-            # 发送成功会离开申请页（回到资料/添加朋友）
-            return not self._is_friend_request_page()
+            return not self._blob_is_friend_request(blob)
 
-        # 1) OCR 底部「发送」（新版通栏按钮，约 y>0.78）
-        if self._ocr_click_any(["发送"], y_min=0.75, y_max=0.98):
-            if _sent_ok():
-                logger.info(f"[{self.account_id}] OCR 底部点「发送」")
-                return True
-
-        # 2) 颜色找底部绿钮
         pt = self._find_green_add_button(y_min=0.78, y_max=0.98)
         if pt and float(pt[1]) >= 0.78:
             click_ratio(self.d, float(pt[0]), float(pt[1]))
@@ -545,30 +567,35 @@ class SocialActions:
                 )
                 return True
 
-        # 3) 坐标底部通栏
-        for rx, ry in ((0.50, 0.90), (0.50, 0.86), (0.50, 0.93), (0.50, 0.82)):
-            if not self._is_friend_request_page():
-                return True
-            click_ratio(self.d, rx, ry)
+        send_pts = get_extra(
+            self.d,
+            "friend_request_send_candidates",
+            [(0.50, 0.90), (0.50, 0.86), (0.50, 0.93), (0.50, 0.82)],
+        )
+        for rx, ry in list(send_pts or [])[:3]:
+            try:
+                rx_f, ry_f = float(rx), float(ry)
+            except Exception:
+                continue
+            if ry_f < 0.78:
+                continue
+            click_ratio(self.d, rx_f, ry_f)
             if _sent_ok():
-                logger.info(f"[{self.account_id}] 坐标底部「发送」 @({rx},{ry})")
+                logger.info(f"[{self.account_id}] 坐标底部「发送」 @({rx_f},{ry_f})")
                 return True
 
-        # 4) 旧版右上角
+        if self._ocr_click_any(["发送"], y_min=0.75, y_max=0.98):
+            if _sent_ok():
+                logger.info(f"[{self.account_id}] OCR 底部点「发送」")
+                return True
+
         if self._ocr_click_right(["发送"], y_min=0.01, y_max=0.14, x_min=0.62):
             if _sent_ok():
                 logger.info(f"[{self.account_id}] OCR 右上角「发送」")
                 return True
 
-        send_pts = get_extra(
-            self.d,
-            "friend_request_send_candidates",
-            [(0.92, 0.055), (0.88, 0.055), (0.50, 0.90)],
-        )
-        for rx, ry in list(send_pts or []):
-            if not self._is_friend_request_page():
-                return True
-            click_ratio(self.d, float(rx), float(ry))
+        for rx, ry in ((0.92, 0.055), (0.88, 0.055)):
+            click_ratio(self.d, rx, ry)
             if _sent_ok():
                 logger.info(f"[{self.account_id}] 坐标点「发送」 @({rx},{ry})")
                 return True
@@ -658,67 +685,61 @@ class SocialActions:
     def _fill_friend_remark_field(self, remark: str) -> bool:
         """
         新版申请页：点「添加备注」输入行写入详细来源；避开「添加标签」。
+        速度优先：EditText → 坐标 → OCR。
         """
         if not remark:
             return False
         from config.device_profiles import get_extra
 
-        self._leave_tag_picker_if_needed()
-
-        # 1) OCR 点「添加备注」行（不要点「添加标签/备忘/照片」）
-        if self._ocr_click_remark_input():
-            if self._is_tag_picker_page():
-                self._leave_tag_picker_if_needed()
-            elif self._set_text_once(remark, allow_clear=True):
-                self._dismiss_keyboard()
-                self._leave_tag_picker_if_needed()
-                if not self._is_tag_picker_page():
-                    logger.info(f"[{self.account_id}] OCR路径写入备注")
-                    return True
-
-        # 2) EditText：有多个时取「非打招呼」的那个（通常 index 1）
+        # 1) EditText[1]（快，无 OCR）
         try:
             edits = self.d(className="android.widget.EditText")
             if edits.exists and edits.count >= 2:
                 edits[1].click()
-                time.sleep(0.25)
-                if not self._is_tag_picker_page():
+                time.sleep(0.15)
+                if self._is_tag_picker_page():
+                    self._leave_tag_picker_if_needed()
+                else:
                     edits[1].set_text(remark)
-                    time.sleep(0.3)
+                    time.sleep(0.2)
+                    self._dismiss_keyboard()
                     logger.info(f"[{self.account_id}] EditText[1] 写入备注")
                     return True
-                self._leave_tag_picker_if_needed()
-            elif edits.exists and edits.count == 1:
-                # 仅一个框时多半是打招呼，跳过以免覆盖验证语
-                pass
         except Exception as e:
             logger.debug(f"[{self.account_id}] EditText 备注失败: {e}")
 
-        # 3) 坐标：红米「添加备注」约 y=0.36；严禁 ≥0.45（标签区）
+        # 2) 坐标：红米「添加备注」约 y=0.36；严禁 ≥0.45（标签区）
         raw = get_extra(
             self.d,
             "friend_request_remark_candidates",
             [(0.50, 0.36), (0.50, 0.34), (0.50, 0.38)],
         )
-        for p in list(raw or [])[:3]:
+        for pnt in list(raw or [])[:3]:
             try:
-                ry = float(p[1])
+                ry = float(pnt[1])
             except Exception:
                 continue
             if ry < 0.28 or ry > 0.42:
                 continue
             click_ratio(self.d, 0.50, ry)
-            time.sleep(0.3)
+            time.sleep(0.2)
             if self._is_tag_picker_page():
                 self._leave_tag_picker_if_needed()
                 continue
             if self._set_text_once(remark, allow_clear=True):
                 self._dismiss_keyboard()
-                self._leave_tag_picker_if_needed()
                 if not self._is_tag_picker_page():
-                    logger.info(
-                        f"[{self.account_id}] 坐标写入备注 @y={ry}"
-                    )
+                    logger.info(f"[{self.account_id}] 坐标写入备注 @y={ry}")
+                    return True
+
+        # 3) OCR 兜底
+        if self._ocr_click_remark_input():
+            if self._is_tag_picker_page():
+                self._leave_tag_picker_if_needed()
+            elif self._set_text_once(remark, allow_clear=True):
+                self._dismiss_keyboard()
+                if not self._is_tag_picker_page():
+                    logger.info(f"[{self.account_id}] OCR路径写入备注")
                     return True
         return False
 
@@ -898,7 +919,8 @@ class SocialActions:
             if best is None:
                 return False
             self.d.click(best[1], best[2])
-            time.sleep(1.0)
+            self._invalidate_ocr_cache()
+            time.sleep(0.45)
             return True
         except Exception as e:
             logger.debug(f"[{self.account_id}] _ocr_click_phrase 失败: {e}")
@@ -1242,12 +1264,7 @@ class SocialActions:
 
     def _ocr_has_any(self, keywords: list[str]) -> bool:
         try:
-            reader = self._ensure_ocr()
-            img = np.array(self.d.screenshot(format="pillow"))
-            gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-            enhanced = self._clahe.apply(gray) if self._clahe is not None else gray
-            results = reader.readtext(cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR))
-            blob = " ".join(str(t) for _, t, c in results if c > 0.25)
+            blob = self._ocr_screen_blob()
             return any(k in blob for k in keywords)
         except Exception:
             return False
@@ -1376,18 +1393,34 @@ class SocialActions:
     # 视频号评论（尽力而为）
     # ================================================================
 
-    def comment_channel(self, text: str) -> bool:
-        """在当前/进入视频号后对当前视频发评论。"""
-        if not text:
-            return False
-        logger.info(f"[{self.account_id}] 视频号评论: {text[:20]}")
+    def comment_channel(self, text: str = "", comment_fn=None) -> bool:
+        """
+        在当前/进入视频号后对当前视频发评论。
+
+        Args:
+            text: 指定评论文案；为空时 OCR 视频文案后经 comment_fn 生成
+            comment_fn: ``(video_context) -> comment``，text 为空时使用
+        """
         try:
             from core.channels_browser import ChannelsBrowser
 
             browser = ChannelsBrowser(self.d, account_id=self.account_id)
             browser._enter_channels()
             time.sleep(2.0)
-            return browser._comment_current(text)
+            body = (text or "").strip()
+            if not body:
+                ctx = browser.extract_video_context()
+                if comment_fn is not None:
+                    try:
+                        body = (comment_fn(ctx) or "").strip()
+                    except Exception as e:
+                        logger.debug(f"[{self.account_id}] comment_fn 失败: {e}")
+                if not body:
+                    body = random.choice(
+                        ["不错", "学到了", "哈哈哈", "支持", "有意思", "太真实了"]
+                    )
+            logger.info(f"[{self.account_id}] 视频号评论: {body[:20]}")
+            return browser._comment_current(body)
         except Exception as e:
             logger.error(f"[{self.account_id}] 视频号评论失败: {e}")
             return False
@@ -1395,6 +1428,34 @@ class SocialActions:
     # ================================================================
     # OCR 辅助
     # ================================================================
+
+    def _invalidate_ocr_cache(self) -> None:
+        self._ocr_blob = ""
+        self._ocr_blob_ts = 0.0
+
+    def _ocr_screen_blob(self, force: bool = False) -> str:
+        """全屏 OCR 一次，短时复用，避免同页反复扫屏。"""
+        now = time.time()
+        if (
+            (not force)
+            and self._ocr_blob
+            and (now - self._ocr_blob_ts) < self._ocr_blob_ttl
+        ):
+            return self._ocr_blob
+        try:
+            reader = self._ensure_ocr()
+            if reader is None:
+                return ""
+            img = np.array(self.d.screenshot(format="pillow"))
+            gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+            enhanced = self._clahe.apply(gray) if self._clahe is not None else gray
+            results = reader.readtext(cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR))
+            blob = " ".join(str(t) for _, t, c in results if c > 0.25)
+            self._ocr_blob = blob
+            self._ocr_blob_ts = now
+            return blob
+        except Exception:
+            return self._ocr_blob or ""
 
     def _ensure_ocr(self):
         if self._ocr is None:
@@ -1415,7 +1476,7 @@ class SocialActions:
         def enhance(gray):
             return self._clahe.apply(gray)
 
-        return ocr_find_and_click(
+        ok = ocr_find_and_click(
             self.d,
             reader,
             keywords,
@@ -1423,3 +1484,6 @@ class SocialActions:
             y_max_ratio=y_max,
             enhance=enhance,
         )
+        if ok:
+            self._invalidate_ocr_cache()
+        return ok

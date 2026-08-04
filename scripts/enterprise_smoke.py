@@ -46,7 +46,11 @@ class EnterpriseSmoke:
 
     def run_offline(self):
         print("\n--- A. 离线编排 ---")
-        from scripts.cold_start_templates import build_cold_start_actions, cold_start_phase
+        from scripts.cold_start_templates import (
+            build_cold_start_actions,
+            cold_start_phase,
+            max_add_friends_for_day,
+        )
         from content.ai_god_planner import AiGodPlanner
         from config.settings import settings
 
@@ -56,6 +60,7 @@ class EnterpriseSmoke:
             for d in (1, 5, 9, 12):
                 acts = build_cold_start_actions(d)
                 assert acts and any(a.action_type.value == "sleep" for a in acts)
+            assert [max_add_friends_for_day(d) for d in (1, 2, 3, 4)] == [1, 2, 2, 0]
             self._record("cold_start_templates", True, f"phases={phases}")
         except Exception as e:
             self._record("cold_start_templates", False, str(e))
@@ -225,7 +230,7 @@ class EnterpriseSmoke:
 
         await self._step_bool(
             "read_article",
-            lambda: PublicAccountBrowser(d, self.account_id).browse(duration_seconds=35) >= 0,
+            lambda: PublicAccountBrowser(d, self.account_id, persona=self.persona).browse(duration_seconds=35) >= 0,
         )
 
         # B9 打开支付页（非真实支付）

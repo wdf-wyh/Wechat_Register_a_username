@@ -6,6 +6,11 @@
   - 换绑卡/发红包/线下真实消费/改头像昵称签名
   - 真实大额交易
 
+行为层禁忌（硬限，AI clamp + 运行时双重兜底）:
+  - 首周加好友 ≤ 3 人/天（Day1-3 按 1/2/2 种子节奏，Day4-7 = 0）
+  - 前两周禁止群发、禁止自动回复（见 FORBIDDEN_BEHAVIOR_ACTIONS）
+  - 禁止凌晨频繁操作（活跃窗仅 07:00–23:00，须含 sleep）
+
 阶段切分（注册日起算 day_index，从 1 开始）:
   Day1-3   身份塑造 · 社交种子
   Day4-7   内容生态
@@ -27,6 +32,26 @@ MANUAL_ONLY_ACTIONS = frozenset({
     "real_purchase",
     "create_group",
 })
+
+# 行为层禁忌：系统永不编排（群发助手 / 自动回复类）
+FORBIDDEN_BEHAVIOR_ACTIONS = frozenset({
+    "mass_send",
+    "broadcast_message",
+    "group_broadcast",
+    "auto_reply",
+    "auto_reply_message",
+})
+
+# 首周加好友绝对天花板（保证通过率；相位硬限可更严）
+WEEK1_ADD_FRIEND_CAP = 3
+# 前两周禁止群发/自动回复的天数上界（含）
+NO_MASS_AUTO_REPLY_DAYS = 14
+# Day1-3 社交种子好友节奏：第 1 天 1 位，第 2 天 2 位，第 3 天 2 位
+DAY1_3_ADD_FRIEND_SCHEDULE = {
+    1: 1,
+    2: 2,
+    3: 2,
+}
 
 
 def cold_start_phase(day_index: int) -> str:
@@ -53,7 +78,7 @@ def build_cold_start_actions(day_index: int, is_weekend: bool = False) -> list[A
         "day11_14": _day11_14,
         "post_14": _post_14,
     }
-    return builders[phase](is_weekend)
+    return builders[phase](day_index, is_weekend)
 
 
 def _sleep_action(is_weekend: bool) -> Action:
@@ -62,12 +87,23 @@ def _sleep_action(is_weekend: bool) -> Action:
     return Action(ActionType.SLEEP, "23:00", "07:00", (0, 0))
 
 
-def _day1_3(is_weekend: bool) -> list[Action]:
-    """社交种子：关注公众号、读文、搜索、刷视频号；不加好友互动发圈。"""
+def _day1_3_add_friend_count(day_index: int) -> int:
+    """Day1-3 种子好友数；超出相位范围时返回 0。"""
+    return int(DAY1_3_ADD_FRIEND_SCHEDULE.get(max(1, int(day_index)), 0))
+
+
+def _day1_3(day_index: int, is_weekend: bool) -> list[Action]:
+    """社交种子：加高粘性好友、关注公众号、读文 10 分钟。"""
     morning = "08:30" if is_weekend else "07:30"
+    add_count = _day1_3_add_friend_count(day_index)
     return [
         Action(ActionType.OPEN_WECHAT, morning, "09:30", (180, 480)),
         Action(ActionType.SCROLL_MOMENTS, "08:00", "09:30", (300, 600)),
+        Action(ActionType.ADD_FRIEND, "09:00", "10:30", (90, 180),
+               params={
+                   "count": add_count,
+                   "source": f"day{min(max(1, int(day_index)), 3)}_seed_friend",
+               }),
         Action(ActionType.FOLLOW_PUBLIC_ACCOUNT, "09:30", "11:00", (60, 180),
                params={"count": 2}),
         Action(ActionType.READ_ARTICLE, "11:30", "13:00", (600, 900),
@@ -85,7 +121,7 @@ def _day1_3(is_weekend: bool) -> list[Action]:
     ]
 
 
-def _day4_7(is_weekend: bool) -> list[Action]:
+def _day4_7(day_index: int, is_weekend: bool) -> list[Action]:
     """内容生态：开始发圈、群发言、小程序。"""
     morning = "08:30" if is_weekend else "07:30"
     return [
@@ -110,7 +146,7 @@ def _day4_7(is_weekend: bool) -> list[Action]:
     ]
 
 
-def _day8_10(is_weekend: bool) -> list[Action]:
+def _day8_10(day_index: int, is_weekend: bool) -> list[Action]:
     """深度互动：限量加好友、深聊、朋友圈高频互动。"""
     morning = "08:30" if is_weekend else "07:30"
     return [
@@ -137,7 +173,7 @@ def _day8_10(is_weekend: bool) -> list[Action]:
     ]
 
 
-def _day11_14(is_weekend: bool) -> list[Action]:
+def _day11_14(day_index: int, is_weekend: bool) -> list[Action]:
     """场景渗透：视频号加长观看+评论、小程序、继续互动。"""
     morning = "08:30" if is_weekend else "07:30"
     return [
@@ -162,7 +198,7 @@ def _day11_14(is_weekend: bool) -> list[Action]:
     ]
 
 
-def _post_14(is_weekend: bool) -> list[Action]:
+def _post_14(day_index: int, is_weekend: bool) -> list[Action]:
     """超过 14 天仍处 trust 阶段时的保守维持。"""
     morning = "08:30" if is_weekend else "07:30"
     return [
@@ -182,14 +218,17 @@ def _post_14(is_weekend: bool) -> list[Action]:
 
 
 # 阶段硬限（AI 输出后也会再 clamp）
+# add_friend: Day1-3 走 1/2/2 种子节奏；Day4-7 = 0；Day8-10 才到 3
 PHASE_HARD_LIMITS = {
     "day1_3": {
-        "add_friend": 0,
+        "add_friend": 2,
         "post_moment": 0,
         "deep_chat": 0,
         "group_chat": 0,
         "like_moment": 0,
         "comment_moment": 0,
+        "mass_send": 0,
+        "auto_reply": 0,
     },
     "day4_7": {
         "add_friend": 0,
@@ -198,14 +237,18 @@ PHASE_HARD_LIMITS = {
         "group_chat": 5,
         "like_moment": 5,
         "comment_moment": 1,
+        "mass_send": 0,
+        "auto_reply": 0,
     },
     "day8_10": {
-        "add_friend": 3,
+        "add_friend": 3,  # 首周后上限，仍 ≤ WEEK1_ADD_FRIEND_CAP 语义延伸
         "post_moment": 1,
         "deep_chat": 5,
         "group_chat": 4,
         "like_moment": 20,
         "comment_moment": 8,
+        "mass_send": 0,
+        "auto_reply": 0,
     },
     "day11_14": {
         "add_friend": 2,
@@ -214,6 +257,8 @@ PHASE_HARD_LIMITS = {
         "group_chat": 4,
         "like_moment": 15,
         "comment_moment": 6,
+        "mass_send": 0,
+        "auto_reply": 0,
     },
     "post_14": {
         "add_friend": 1,
@@ -222,5 +267,22 @@ PHASE_HARD_LIMITS = {
         "group_chat": 3,
         "like_moment": 8,
         "comment_moment": 3,
+        "mass_send": 0,   # 成熟前仍禁止群发助手
+        "auto_reply": 0,
     },
 }
+
+
+def max_add_friends_for_day(day_index: int) -> int:
+    """
+    加好友当日绝对上限。
+    Day1-3 按 1/2/2；其余首周遵守相位硬限且 ≤3；之后取相位硬限。
+    """
+    d = max(1, int(day_index))
+    phase = cold_start_phase(d)
+    if phase == "day1_3":
+        return _day1_3_add_friend_count(d)
+    phase_cap = int(PHASE_HARD_LIMITS.get(phase, {}).get("add_friend", 0))
+    if d <= 7:
+        return min(phase_cap, WEEK1_ADD_FRIEND_CAP)
+    return phase_cap

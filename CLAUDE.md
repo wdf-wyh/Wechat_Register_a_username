@@ -226,7 +226,7 @@ print(resolve_profile(d).display_name)
 
 | 天 | 相位 | 自动化内容 | 跳过（人工） |
 |----|------|-----------|-------------|
-| 1-3 | 社交种子 | 关注公众号、读文、搜索、视频号、小程序、打开支付页 | 头像/昵称/绑卡/红包/线下消费 |
+| 1-3 | 社交种子 | 添加种子好友（1/2/2）、每天关注 2 个公众号、读文 10 分钟、搜索、视频号、小程序、打开支付页 | 头像/昵称/绑卡/红包/线下消费 |
 | 4-7 | 内容生态 | 发圈、群发言、轻点赞、小程序 | 跳一跳需额外适配 |
 | 8-10 | 深度互动 | 限量加好友、深聊、朋友圈高频互动 | 需预填 `seed_friends` |
 | 11-14 | 场景渗透 | 视频号加长+评论、小程序、继续互动 | 真实电商下单 |
@@ -244,7 +244,7 @@ print(resolve_profile(d).display_name)
 1. `BaseScript.run_daily` → `AiGodPlanner.plan_day`
 2. 汇总注册天数 / 健康状态 / 今日统计 / 近期失败 / 硬限
 3. LLM 输出当日 `actions` JSON
-4. **安全 clamp**：剔除人工动作、夜间操作、超阶段上限；`consume_only` 只留浏览类
+4. **安全 clamp**：剔除人工动作、行为禁忌（群发/自动回复）、夜间操作、超阶段上限；首周加好友≤3（相位常为 0）；`consume_only` 只留浏览类
 5. LLM 不可用或解析失败 → 回退 `cold_start_templates`
 
 ```bash
@@ -345,6 +345,20 @@ UPDATE accounts SET state='cooldown', mode='consume_only' WHERE id='acc_xxx';
 ---
 
 ## 八、环境变量
+
+优先级：系统/当前进程已设置的环境变量 > `.env` 文件（项目根目录）。
+
+如果你不想每次都在终端里手动导出，可以在项目根目录放一个 `.env` 文件（或设置 `WECHAT_FARM_ENV` 来加载 `.env.<环境名>`），使用 `KEY=VALUE` 格式，例如：
+
+```bash
+# 项目根目录：Wechat_farm/.env
+LLM_API_KEY=sk-xxxxxxxx
+LLM_BASE_URL=https://api.deepseek.com
+LLM_MODEL=doubao-seed-2-1-pro-260628
+USE_AI_GOD_PLANNER=1
+```
+
+或者继续使用终端环境变量方式（示例）：
 
 ```bash
 # LLM API（可选，不设置则用本地模板库 + 规则剧本）

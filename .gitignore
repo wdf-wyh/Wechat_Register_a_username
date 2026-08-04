@@ -8,6 +8,9 @@ data/
 py测试/
 .vscode/
 .idea/
+.env
+.env.*
+!.env.example
 *.pyo
 .DS_Store
 Thumbs.db

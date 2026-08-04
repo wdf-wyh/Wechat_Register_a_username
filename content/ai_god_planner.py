@@ -23,12 +23,17 @@ from typing import Any, Optional
 
 from config.settings import settings
 from content.llm_client import LLMClient
+from content.personas import get_public_account_candidates
 from scripts.base_script import Action, ActionType
 from scripts.cold_start_templates import (
+    FORBIDDEN_BEHAVIOR_ACTIONS,
     MANUAL_ONLY_ACTIONS,
+    NO_MASS_AUTO_REPLY_DAYS,
     PHASE_HARD_LIMITS,
+    WEEK1_ADD_FRIEND_CAP,
     build_cold_start_actions,
     cold_start_phase,
+    max_add_friends_for_day,
 )
 from utils.logger import get_logger
 
@@ -91,7 +96,7 @@ class AiGodPlanner:
         if ctx.get("mode") == "consume_only":
             actions = self._filter_consume_only(actions)
 
-        actions = self._clamp_actions(actions, phase)
+        actions = self._clamp_actions(actions, phase, day_index=day_index)
         actions = self._ensure_sleep(actions, is_weekend)
 
         logger.info(
@@ -147,14 +152,22 @@ class AiGodPlanner:
             "mode": account.get("mode", "full"),
             "friend_count": len(people),
             "group_count": len(groups),
+            "industry": self.persona.get("industry", ""),
             "seed_friends": self.persona.get("seed_friends", [])[:8],
             "seed_groups": self.persona.get("seed_groups", [])[:5],
-            "public_accounts": self.persona.get("public_accounts", [])[:8],
+            "public_accounts": get_public_account_candidates(self.persona, count=8),
             "today_stats": today_stats,
             "health": health or {},
             "recent_fails": recent_fails,
             "hard_limits": PHASE_HARD_LIMITS.get(phase, {}),
+            "add_friend_cap_today": max_add_friends_for_day(day_index),
             "manual_forbidden": sorted(MANUAL_ONLY_ACTIONS),
+            "behavior_forbidden": sorted(FORBIDDEN_BEHAVIOR_ACTIONS),
+            "behavior_taboos": [
+                f"首周加好友≤{WEEK1_ADD_FRIEND_CAP}人/天（今日相位上限见 add_friend_cap_today）",
+                f"前{NO_MASS_AUTO_REPLY_DAYS}天禁止群发、禁止自动回复",
+                "禁止凌晨频繁操作（仅 07:00-23:00）",
+            ],
             "allowed_actions": sorted(ALLOWED_ACTION_TYPES),
         }
 
@@ -178,7 +191,7 @@ class AiGodPlanner:
             if not isinstance(item, dict):
                 continue
             type_name = str(item.get("type") or item.get("action_type") or "").strip()
-            if type_name in MANUAL_ONLY_ACTIONS:
+            if type_name in MANUAL_ONLY_ACTIONS or type_name in FORBIDDEN_BEHAVIOR_ACTIONS:
                 continue
             if type_name not in ALLOWED_ACTION_TYPES:
                 logger.debug(f"忽略未知动作: {type_name}")
@@ -240,8 +253,22 @@ class AiGodPlanner:
         logger.warning("无法解析 AI 剧本 JSON")
         return None
 
-    def _clamp_actions(self, actions: list[Action], phase: str) -> list[Action]:
-        limits = PHASE_HARD_LIMITS.get(phase, {})
+    def _clamp_actions(
+        self,
+        actions: list[Action],
+        phase: str,
+        day_index: int = 1,
+    ) -> list[Action]:
+        limits = dict(PHASE_HARD_LIMITS.get(phase, {}))
+        # 首周加好友绝对天花板（即使相位被误配也不超过）
+        add_cap = max_add_friends_for_day(day_index)
+        if "add_friend" in limits:
+            limits["add_friend"] = min(int(limits["add_friend"]), add_cap)
+        # 前两周强制禁群发/自动回复
+        if day_index <= NO_MASS_AUTO_REPLY_DAYS:
+            limits["mass_send"] = 0
+            limits["auto_reply"] = 0
+
         counters: dict[str, int] = {}
         kept: list[Action] = []
 
@@ -261,7 +288,12 @@ class AiGodPlanner:
                 kept.append(action)
                 continue
 
-            # 禁凌晨窗口
+            type_name = action.action_type.value
+            if type_name in FORBIDDEN_BEHAVIOR_ACTIONS:
+                logger.debug(f"剔除行为禁忌动作: {type_name}")
+                continue
+
+            # 禁凌晨窗口（避免凌晨频繁操作）
             try:
                 sh = int(action.time_window_start.split(":")[0])
                 eh = int(action.time_window_end.split(":")[0])
@@ -270,7 +302,20 @@ class AiGodPlanner:
             if sh >= 23 or eh < 7 or (sh < 7 and eh <= 7):
                 # 允许跨夜的 SLEEP；其它丢掉
                 if action.action_type != ActionType.SLEEP:
-                    logger.debug(f"剔除夜间动作: {action.action_type.value} {action.time_window_start}")
+                    logger.debug(f"剔除夜间动作: {type_name} {action.time_window_start}")
+                    continue
+
+            # 群聊 ≠ 群发：SEND_MESSAGE 若带多目标视为群发，前两周剔除
+            if (
+                day_index <= NO_MASS_AUTO_REPLY_DAYS
+                and action.action_type == ActionType.SEND_MESSAGE
+            ):
+                targets = action.params.get("targets") or action.params.get("contacts")
+                if isinstance(targets, (list, tuple)) and len(targets) > 1:
+                    logger.debug("前两周禁止一对多群发，丢弃 send_message(multi)")
+                    continue
+                if action.params.get("mass") or action.params.get("broadcast"):
+                    logger.debug("前两周禁止群发标记，丢弃 send_message")
                     continue
 
             limit_key = type_to_limit.get(action.action_type)

@@ -46,6 +46,8 @@ class LLMClient:
             self.client = OpenAI(
                 api_key=settings.LLM_API_KEY,
                 base_url=settings.LLM_BASE_URL,
+                # 避免 SDK 内置重试导致 30s timeout 被放大成 60~90s 卡顿
+                max_retries=0,
             )
         self._history_hashes: list[str] = []
 
@@ -151,6 +153,116 @@ class LLMClient:
         text = self._call_api(prompt, temperature=0.8, max_tokens=80)
         return text
 
+    def generate_channel_comment(
+        self,
+        persona: dict,
+        video_context: str = "",
+    ) -> str:
+        """
+        根据视频号画面 OCR 到的标题/作者/简介生成评论。
+
+        Args:
+            persona: 人格档案
+            video_context: OCR 提取的作者、标题、简介等文本
+
+        Returns:
+            评论文本（5-25字）；LLM 不可用时返回空串
+        """
+        ctx = (video_context or "").strip()[:280]
+        context_line = (
+            f'\n当前视频相关文字（OCR，可能不完整）："{ctx}"'
+            if ctx
+            else "\n（未能识别到视频文案，请发一句通用、自然的短评）"
+        )
+        prompt = f"""你正在刷视频号，准备给当前视频留一条评论。{context_line}
+
+你的个人画像：
+- 年龄：{persona.get('age', '25-35')}
+- 兴趣：{', '.join(persona.get('hobbies', ['日常']))}
+- 评论风格：{persona.get('comment_style', '简洁真诚')}
+
+请写一条视频号评论（5-25字）。
+要求：
+- 简短自然，像随手敲的，不要官话
+- 若有视频文案，尽量贴合内容，但不要复述整段
+- 不要用话题标签，少用或不用 emoji
+- 只输出评论正文，不要引号或解释
+"""
+        text = self._call_api(prompt, temperature=0.85, max_tokens=80)
+        return (text or "").strip().strip('"\'「」')
+
+    def generate_article_comment(
+        self,
+        persona: dict,
+        title: str = "",
+        article_context: str = "",
+    ) -> str:
+        """
+        根据公众号文章标题和正文片段生成评论。
+
+        Args:
+            persona: 人格档案
+            title: 文章标题
+            article_context: OCR 提取的正文/小标题摘要
+
+        Returns:
+            评论文本（5-30字）；LLM 不可用时返回空串
+        """
+        title = (title or "").strip()[:80]
+        ctx = (article_context or "").strip()[:320]
+        title_line = f'\n文章标题："{title}"' if title else ""
+        context_line = (
+            f'\n文章摘录（OCR，可能不完整）："{ctx}"'
+            if ctx
+            else "\n（未能识别到正文，请根据标题写一句自然短评）"
+        )
+        prompt = f"""你刚看完一篇微信公众号文章，准备留一条评论。{title_line}{context_line}
+
+你的个人画像：
+- 年龄：{persona.get('age', '25-35')}
+- 兴趣：{', '.join(persona.get('hobbies', ['日常']))}
+- 评论风格：{persona.get('comment_style', '简洁真诚')}
+
+请写一条公众号文章评论（5-30字）。
+要求：
+- 结合标题或正文内容，像真人刚看完后的随手评论
+- 简短自然，不要官话，不要复述整段原文
+- 不要加书名号、引号、解释或序号
+"""
+        text = self._call_api(prompt, temperature=0.82, max_tokens=90)
+        return (text or "").strip().strip('"\'「」')
+
+    def generate_post_from_article(
+        self,
+        persona: dict,
+        title: str = "",
+        article_context: str = "",
+    ) -> str:
+        """
+        根据公众号文章标题和正文片段生成一条读后感朋友圈文案。
+        """
+        title = (title or "").strip()[:80]
+        ctx = (article_context or "").strip()[:320]
+        prompt = f"""你刚看完一篇微信公众号文章，想发一条朋友圈分享感受。
+
+你的个人画像：
+- 年龄：{persona.get('age', '25-35')}
+- 城市：{persona.get('city', '北京')}
+- 兴趣爱好：{', '.join(persona.get('hobbies', ['阅读']))}
+- 发圈风格：{persona.get('post_style', '随性简短')}
+
+文章标题：{title or '未识别'}
+文章摘录（OCR，可能不完整）：{ctx or '未识别到正文'}
+
+请写一条 18-60 字的朋友圈文案，像普通人转化成自己的感受：
+- 不要像摘要，不要长篇复述
+- 允许提一句“刚看到/午休刷到”之类生活化语气
+- 自然口语化，不要太正式
+- 只输出正文，不要引号或解释
+"""
+        text = self._call_api(prompt, temperature=0.86, max_tokens=120)
+        return (text or "").strip().strip('"\'「」')
+
     # ================================================================
     # 深聊多轮 / 上帝视角编排
     # ================================================================
@@ -207,6 +319,7 @@ class LLMClient:
 
 ## 人设
 - 名称：{persona.get('name', '普通用户')}
+- 行业偏好：{persona.get('industry', '通用生活')}
 - 年龄：{persona.get('age')}
 - 城市：{persona.get('city')}
 - 兴趣：{', '.join(persona.get('hobbies', []))}
@@ -214,14 +327,18 @@ class LLMClient:
 
 ## 硬性规则（必须遵守）
 1. 只能使用 allowed_actions 中的动作 type
-2. 禁止 manual_forbidden 中的人工动作
-3. 遵守 hard_limits 当日上限（超过的不要排）
-4. 活跃时间仅 07:00-23:00；必须包含一条 sleep
-5. 新号前期（day1_3）不要加好友、发圈、深聊、群聊、点赞评论
-6. 动作数量建议 8-14 个，时间窗不要全部重叠在同一小时
-7. 如果 mode=consume_only 或 state=cooldown，只排浏览类（刷朋友圈/视频号/读文章/搜索/收藏/小程序/打开支付页）；视频号 params 须 comment_rate=0
-8. 如果 recent_fails 里某动作连续失败，今天减少或避开该动作
-9. 视频号 scroll_channels 每日合计约 10 分钟：params 建议 {{"duration": 600, "finish_watch": true, "like_rate": 0.2, "comment_rate": 0.18}}（前期 day1_3 的 comment_rate 用 0）
+2. 禁止 manual_forbidden / behavior_forbidden 中的动作（尤其群发、自动回复）
+3. 遵守 hard_limits 与 add_friend_cap_today 当日上限（超过的不要排）
+4. 活跃时间仅 07:00-23:00；必须包含一条 sleep；禁止凌晨频繁操作
+5. 新号前期（day1_3）以社交种子培育为主：每天关注 2 个公众号，阅读推文约 10 分钟；仅可按 seed_friends/手机号名单加好友，节奏固定为 Day1=1、Day2=2、Day3=2
+5.1 如果排 follow_public_account，优先使用 public_accounts 里的行业相关公众号，不要选泛新闻号，除非行业名单不足
+6. 首周加好友不得超过 3 人/天；day4_7 相位不要排 add_friend；day1_3 只能排当日上限内的 add_friend，且不得出现发圈、深聊、群聊、朋友圈点赞评论
+7. 前 14 天禁止群发（含 send_message 多目标/mass/broadcast）、禁止自动回复
+8. 动作数量建议 8-14 个，时间窗不要全部重叠在同一小时
+9. 如果 mode=consume_only 或 state=cooldown，只排浏览类（刷朋友圈/视频号/读文章/搜索/收藏/小程序/打开支付页）；视频号 params 须 comment_rate=0
+10. 如果 recent_fails 里某动作连续失败，今天减少或避开该动作
+11. 视频号 scroll_channels 每日合计约 10 分钟：params 建议 {{"duration": 600, "finish_watch": true, "like_rate": 0.2, "comment_rate": 0.18}}（前期 day1_3 的 comment_rate 用 0）
+12. 遵守 behavior_taboos 列表中的全部禁忌
 
 ## 输出格式
 只输出 JSON（不要 markdown）：
@@ -294,7 +411,7 @@ class LLMClient:
                 messages=[{"role": "user", "content": prompt}],
                 temperature=adjusted_temp,
                 max_tokens=max_tokens,
-                timeout=30,
+                timeout=45,
             )
             text = response.choices[0].message.content.strip()
 

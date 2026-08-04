@@ -135,7 +135,9 @@ class FastTestScript(BaseScript):
         from core.public_account_browser import PublicAccountBrowser
 
         def _browse_articles():
-            browser = PublicAccountBrowser(self.wc.d, account_id=self.account_id)
+            browser = PublicAccountBrowser(
+                self.wc.d, account_id=self.account_id, persona=self.persona
+            )
             return {"read": browser.browse(duration_seconds=45)}
 
         await step(6, "阅读公众号 (45s)", _browse_articles)

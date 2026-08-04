@@ -14,6 +14,7 @@ PERSONAS = [
     {
         "id": "p01",
         "name": "职场白领-北京",
+        "industry": "互联网科技",
         "age": 28,
         "city": "北京",
         "gender": "男",
@@ -23,13 +24,16 @@ PERSONAS = [
         "daily_routine": "早通勤刷朋友圈，午休看公众号，晚上偶尔发心情",
         "topics": ["互联网", "跑步打卡", "咖啡探店", "通勤吐槽", "数码产品"],
         # 冷启动种子资源（人工预填；空则对应动作自动跳过）
+        # seed_friends 可直接填写手机号/微信号列表，Day1-3 会按 1/2/2 节奏依次添加。
         "seed_friends": [],
         "seed_groups": [],
+        "industry_public_accounts": ["36氪", "极客公园", "爱范儿", "少数派", "虎嗅", "InfoQ"],
         "public_accounts": ["人民日报", "央视新闻", "36氪", "极客公园", "爱范儿", "少数派"],
     },
     {
         "id": "p02",
         "name": "文艺青年-上海",
+        "industry": "内容消费与生活方式",
         "age": 26,
         "city": "上海",
         "gender": "女",
@@ -40,11 +44,13 @@ PERSONAS = [
         "topics": ["美食探店", "展览打卡", "胶片摄影", "周末旅行", "咖啡拉花"],
         "seed_friends": [],
         "seed_groups": [],
+        "industry_public_accounts": ["一条", "三联生活周刊", "理想国", "豆瓣", "Lens", "凤凰WEEKLY"],
         "public_accounts": ["下厨房", "一条", "理想国", "豆瓣", "小红书精选", "三联生活周刊"],
     },
     {
         "id": "p03",
         "name": "宅男-广州",
+        "industry": "游戏动漫",
         "age": 24,
         "city": "广州",
         "gender": "男",
@@ -55,11 +61,13 @@ PERSONAS = [
         "topics": ["猫", "新游戏", "外卖踩雷", "熬夜", "二次元"],
         "seed_friends": [],
         "seed_groups": [],
+        "industry_public_accounts": ["机核网", "游研社", "电玩巴士", "动漫之家", "手游那点事", "JumpxSwitch"],
         "public_accounts": ["机核网", "游研社", "电玩巴士", "哔哩哔哩弹幕网", "动漫之家", "猫奴日常"],
     },
     {
         "id": "p04",
         "name": "宝妈-成都",
+        "industry": "母婴育儿",
         "age": 32,
         "city": "成都",
         "gender": "女",
@@ -70,11 +78,13 @@ PERSONAS = [
         "topics": ["带娃日常", "家常菜", "追剧推荐", "亲子游", "幼儿园"],
         "seed_friends": [],
         "seed_groups": [],
+        "industry_public_accounts": ["丁香妈妈", "年糕妈妈", "宝宝树", "凯叔讲故事", "妈妈网", "父母堂"],
         "public_accounts": ["丁香妈妈", "父母必读", "下厨房", "年糕妈妈", "凯叔讲故事", "宝宝树"],
     },
     {
         "id": "p05",
         "name": "大学生-武汉",
+        "industry": "校园成长",
         "age": 20,
         "city": "武汉",
         "gender": "女",
@@ -85,11 +95,13 @@ PERSONAS = [
         "topics": ["考试吐槽", "奶茶测评", "综艺安利", "校园日常", "自拍"],
         "seed_friends": [],
         "seed_groups": [],
+        "industry_public_accounts": ["武大青年", "考研政治", "GQ实验室", "新世相", "槽值", "中国大学生在线"],
         "public_accounts": ["毒舌电影", "GQ实验室", "新世相", "丁香医生", "考研政治", "武大青年"],
     },
     {
         "id": "p06",
         "name": "中年商务-深圳",
+        "industry": "财经管理",
         "age": 42,
         "city": "深圳",
         "gender": "男",
@@ -100,11 +112,13 @@ PERSONAS = [
         "topics": ["行业趋势", "管理心得", "经济观察", "茶文化", "健康"],
         "seed_friends": [],
         "seed_groups": [],
+        "industry_public_accounts": ["华尔街见闻", "第一财经", "虎嗅", "清华管理评论", "笔记侠", "创业邦"],
         "public_accounts": ["华尔街见闻", "第一财经", "虎嗅", "得到", "清华管理评论", "南方周末"],
     },
     {
         "id": "p07",
         "name": "自由职业-杭州",
+        "industry": "摄影文旅",
         "age": 29,
         "city": "杭州",
         "gender": "男",
@@ -115,11 +129,13 @@ PERSONAS = [
         "topics": ["徒步路线", "摄影作品", "音乐节现场", "小众酒吧", "vlog"],
         "seed_friends": [],
         "seed_groups": [],
+        "industry_public_accounts": ["摄影之友", "穷游网", "音乐先声", "周末去哪儿", "户外探险outdoor", "Feekr旅行"],
         "public_accounts": ["摄影之友", "穷游网", "音乐先声", "杭州本地宝", "周末去哪儿", "精酿啤酒"],
     },
     {
         "id": "p08",
         "name": "退休阿姨-南京",
+        "industry": "健康生活",
         "age": 58,
         "city": "南京",
         "gender": "女",
@@ -130,6 +146,7 @@ PERSONAS = [
         "topics": ["养生知识", "广场舞", "旅游打卡", "孙辈照片", "菜谱分享"],
         "seed_friends": [],
         "seed_groups": [],
+        "industry_public_accounts": ["养生中国", "丁香医生", "美食天下", "旅游卫视", "健康时报", "南京发布"],
         "public_accounts": ["养生中国", "丁香医生", "央视新闻", "南京发布", "美食天下", "旅游卫视"],
     },
 ]
@@ -163,3 +180,21 @@ def random_persona(seed: int = None) -> dict:
     """
     rng = random.Random(seed) if seed else random
     return rng.choice(PERSONAS).copy()
+
+
+def get_public_account_candidates(persona: dict, count: int | None = None) -> list[str]:
+    """
+    返回公众号候选名单。
+
+    优先行业垂类账号，再补通用账号，自动去重并保序。
+    """
+    persona = persona or {}
+    merged: list[str] = []
+    for key in ("industry_public_accounts", "public_accounts"):
+        for name in persona.get(key, []) or []:
+            text = str(name).strip()
+            if text and text not in merged:
+                merged.append(text)
+    if count is None:
+        return merged
+    return merged[: max(0, int(count))]

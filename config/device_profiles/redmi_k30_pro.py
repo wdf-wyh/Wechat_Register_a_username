@@ -103,5 +103,17 @@ PROFILE = DeviceProfile(
         "moments_camera": (0.90, 0.054),
         "moments_publish": (0.90, 0.055),
         "moments_dots_x_ratios": (0.93, 0.91, 0.89, 0.95, 0.87),
+        # 视频号底栏最右侧评论气泡（数字上方图标）
+        "channels_comment_icon": (0.93, 0.88),
+        "channels_comment_input": (0.42, 0.72),
+        "channels_comment_send": (0.90, 0.62),
+        # 键盘弹起后「发送」在表情行右侧
+        "channels_comment_send_candidates": [
+            (0.90, 0.62),
+            (0.92, 0.60),
+            (0.88, 0.64),
+            (0.90, 0.58),
+            (0.93, 0.56),
+        ],
     },
 )

@@ -414,15 +414,10 @@ class BaseScript(ABC):
         comment_rate = params.get("comment_rate", 0.18)
         finish_watch = params.get("finish_watch", True)
         comment_texts = params.get("comment_texts")
-        if not comment_texts:
-            try:
-                from content.llm_client import LLMClient
-                comment_texts = [
-                    LLMClient().generate_comment(self.persona),
-                    self.h.choice(["不错", "学到了", "哈哈哈", "支持", "有意思"]),
-                ]
-            except Exception:
-                comment_texts = None
+        # 未显式给文案池时：OCR 视频文案 → LLM 按内容评论
+        comment_fn = None
+        if not comment_texts and comment_rate > 0:
+            comment_fn = self._channel_comment_fn()
 
         browser = ChannelsBrowser(self.wc.d, account_id=self.account_id)
         result = browser.browse(
@@ -432,8 +427,27 @@ class BaseScript(ABC):
             finish_watch=finish_watch,
             comment_rate=comment_rate,
             comment_texts=comment_texts,
+            comment_fn=comment_fn,
         )
         return result.get("watched", 0) > 0
+
+    def _channel_comment_fn(self):
+        """返回 (video_context) -> comment；LLM 失败则用人设短评兜底。"""
+        fallback = ["不错", "学到了", "哈哈哈", "支持", "有意思", "太真实了"]
+
+        def _gen(video_context: str) -> str:
+            try:
+                from content.llm_client import LLMClient
+                text = LLMClient().generate_channel_comment(
+                    self.persona, video_context or ""
+                )
+                if text:
+                    return text[:40]
+            except Exception:
+                pass
+            return self.h.choice(fallback)
+
+        return _gen
 
     def _handle_like_channel(self, params: dict) -> bool:
         """点赞视频号"""
@@ -442,24 +456,36 @@ class BaseScript(ABC):
         return browser._like_current()
 
     def _handle_comment_channel(self, params: dict) -> bool:
-        """视频号评论"""
-        from core.social_actions import SocialActions
+        """视频号评论：优先用 params.text，否则 OCR 文案 + LLM。"""
+        from core.channels_browser import ChannelsBrowser
 
-        text = params.get("text", "")
+        browser = ChannelsBrowser(self.wc.d, account_id=self.account_id)
+        browser._enter_channels()
+        time.sleep(2.0)
+
+        text = (params.get("text") or "").strip()
         if not text:
-            try:
-                from content.llm_client import LLMClient
-                text = LLMClient().generate_comment(self.persona)
-            except Exception:
-                text = self.h.choice(["不错", "学到了", "哈哈哈", "支持"])
-        return SocialActions(self.wc.d, self.account_id).comment_channel(text)
+            text = self._channel_comment_fn()(browser.extract_video_context())
+        return browser._comment_current(text)
 
     def _handle_read_article(self, params: dict) -> bool:
         """阅读公众号文章（OCR 方案）"""
         from core.public_account_browser import PublicAccountBrowser
         duration = params.get("duration", 180)
-        browser = PublicAccountBrowser(self.wc.d, account_id=self.account_id)
-        browser.browse(duration_seconds=duration)
+        comment_rate = float(params.get("comment_rate", 0.15))
+        post_after_read = bool(params.get("post_after_read", False))
+        post_rate = float(params.get("post_rate", 0.0))
+        browser = PublicAccountBrowser(
+            self.wc.d,
+            account_id=self.account_id,
+            persona=self.persona,
+        )
+        browser.browse(
+            duration_seconds=duration,
+            comment_rate=comment_rate,
+            post_after_read=post_after_read,
+            post_rate=post_rate,
+        )
         return True
 
     def _handle_favorite_article(self, params: dict) -> bool:
@@ -469,8 +495,9 @@ class BaseScript(ABC):
     def _handle_follow_public_account(self, params: dict) -> bool:
         """关注行业公众号（名单来自 persona.public_accounts）"""
         from core.social_actions import SocialActions
+        from content.personas import get_public_account_candidates
 
-        names = params.get("names") or self.persona.get("public_accounts") or []
+        names = params.get("names") or get_public_account_candidates(self.persona)
         count = params.get("count", 1)
         if isinstance(count, tuple):
             count = self.h.randint(*count)
@@ -505,6 +532,22 @@ class BaseScript(ABC):
     def _handle_send_message(self, params: dict) -> bool:
         """发送聊天消息（OCR+IME 方案）"""
         from core.message_sender import MessageSender
+        from scripts.cold_start_templates import NO_MASS_AUTO_REPLY_DAYS
+
+        # 前两周禁止群发（一对多 / mass 标记）
+        day_index = self._registration_day_index()
+        if day_index <= NO_MASS_AUTO_REPLY_DAYS:
+            targets = params.get("targets") or params.get("contacts")
+            if isinstance(targets, (list, tuple)) and len(targets) > 1:
+                logger.warning(
+                    f"[{self.account_id}] 前{NO_MASS_AUTO_REPLY_DAYS}天禁止群发，跳过"
+                )
+                return True
+            if params.get("mass") or params.get("broadcast") or params.get("auto_reply"):
+                logger.warning(
+                    f"[{self.account_id}] 前{NO_MASS_AUTO_REPLY_DAYS}天禁止群发/自动回复，跳过"
+                )
+                return True
 
         contact = params.get("contact", "")
         if not contact:
@@ -647,10 +690,32 @@ class BaseScript(ABC):
     def _handle_add_friend(self, params: dict) -> bool:
         """加好友（仅 persona.seed_friends / params.targets，严格限流）"""
         from core.social_actions import SocialActions
+        from scripts.cold_start_templates import (
+            WEEK1_ADD_FRIEND_CAP,
+            max_add_friends_for_day,
+        )
+
+        day_index = self._registration_day_index()
+        cap = max_add_friends_for_day(day_index)
+        if cap <= 0:
+            logger.info(
+                f"[{self.account_id}] Day{day_index} 禁止自动加好友"
+                f"（首周上限≤{WEEK1_ADD_FRIEND_CAP}，相位硬限=0），跳过"
+            )
+            return True
+
+        already = self._today_success_count("add_friend")
+        remain = max(0, cap - already)
+        if remain <= 0:
+            logger.info(
+                f"[{self.account_id}] 加好友已达今日上限 {cap}（Day{day_index}），跳过"
+            )
+            return True
 
         count = params.get("count", 1)
         if isinstance(count, tuple):
             count = self.h.randint(*count)
+        count = min(int(count), remain)
 
         targets = params.get("targets") or list(self.persona.get("seed_friends") or [])
         if not targets:
@@ -678,8 +743,39 @@ class BaseScript(ABC):
                 except Exception:
                     pass
                 ok += 1
+                self._increment_daily_count("add_friend")
             self.h.random_sleep(15.0, 40.0)
         return ok > 0
+
+    def _registration_day_index(self) -> int:
+        """注册日起算的天数（从 1 开始）。"""
+        from datetime import date, datetime
+
+        account = self.db.get_account(self.account_id) or {}
+        reg = account.get("registration_date") or date.today().isoformat()
+        try:
+            reg_date = datetime.strptime(str(reg)[:10], "%Y-%m-%d").date()
+            return max(1, (date.today() - reg_date).days + 1)
+        except Exception:
+            return 1
+
+    def _today_success_count(self, action_type: str) -> int:
+        """今日该动作成功次数（内存计数 + DB 已落库）。"""
+        mem = self._daily_counts.get(action_type, 0)
+        try:
+            from datetime import date
+
+            logs = self.db.get_action_logs(
+                self.account_id, limit=200, date=date.today().isoformat()
+            )
+            db_n = sum(
+                1
+                for row in logs
+                if row.get("action_type") == action_type and row.get("success")
+            )
+            return max(mem, db_n)
+        except Exception:
+            return mem
 
     def _handle_browse_mini_program(self, params: dict) -> bool:
         """浏览小程序"""

@@ -394,6 +394,7 @@ class WeChatControl:
         finish_watch: bool = True,
         comment_rate: float = 0.18,
         comment_texts: list = None,
+        comment_fn=None,
     ) -> dict:
         """
         刷视频号（默认约 10 分钟完播 + 概率点赞/评论）。
@@ -404,7 +405,8 @@ class WeChatControl:
             duration_seconds:  总观看秒数；都未指定时默认 600
             finish_watch:      尽量完播再切下一条
             comment_rate:      评论概率
-            comment_texts:     评论文案池
+            comment_texts:     评论文案池（有 comment_fn 时作兜底）
+            comment_fn:        (video_context) -> comment，按 OCR 文案生成评论
 
         Returns:
             {"liked", "commented", "watched", "switched", "elapsed"}
@@ -418,6 +420,7 @@ class WeChatControl:
             finish_watch=finish_watch,
             comment_rate=comment_rate,
             comment_texts=comment_texts,
+            comment_fn=comment_fn,
         )
 
     def like_channel_video(self) -> bool:
