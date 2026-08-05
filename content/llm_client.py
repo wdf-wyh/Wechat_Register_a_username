@@ -335,10 +335,11 @@ class LLMClient:
 6. 首周加好友不得超过 3 人/天；day4_7 相位不要排 add_friend；day1_3 只能排当日上限内的 add_friend，且不得出现发圈、深聊、群聊、朋友圈点赞评论
 7. 前 14 天禁止群发（含 send_message 多目标/mass/broadcast）、禁止自动回复
 8. 动作数量建议 8-14 个，时间窗不要全部重叠在同一小时
-9. 如果 mode=consume_only 或 state=cooldown，只排浏览类（刷朋友圈/视频号/读文章/搜索/收藏/小程序/打开支付页）；视频号 params 须 comment_rate=0
+9. 如果 mode=consume_only 或 state=cooldown，只排浏览类（刷朋友圈/视频号/读文章/搜索/收藏/小程序/小游戏/打开支付页）；视频号 params 须 comment_rate=0
 10. 如果 recent_fails 里某动作连续失败，今天减少或避开该动作
 11. 视频号 scroll_channels 每日合计约 10 分钟：params 建议 {{"duration": 600, "finish_watch": true, "like_rate": 0.2, "comment_rate": 0.18}}（前期 day1_3 的 comment_rate 用 0）
-12. 遵守 behavior_taboos 列表中的全部禁忌
+12. day4_7 / day11_14 可排 play_mini_game（默认跳一跳）：params 建议 {{"game": "跳一跳", "duration": 180}}
+13. 遵守 behavior_taboos 列表中的全部禁忌
 
 ## 输出格式
 只输出 JSON（不要 markdown）：

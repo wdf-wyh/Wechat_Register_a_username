@@ -49,7 +49,7 @@ wechat_farm/
 │   ├── public_account_browser.py  # 浏览公众号
 │   ├── favorites_browser.py # 浏览收藏夹
 │   ├── search_helper.py     # 全局搜索
-│   ├── social_actions.py    # 关注公众号/加好友/群聊深聊/小程序
+│   ├── social_actions.py    # 关注公众号/加好友/群聊深聊/小程序/官方小游戏
 │   ├── humanizer.py         # 拟人化引擎
 │   ├── device.py            # 设备管理
 │   └── element_locator.py   # 元素定位辅助
@@ -109,6 +109,7 @@ wc.send_message("你好", contact="张三")         # 发文字
 wc.global_search("天气")                       # 全局搜索
 wc.scroll_channels(duration_seconds=600, finish_watch=True, comment_rate=0.18)  # 视频号约10分钟完播+评论
 wc.browse_favorites(120)                       # 浏览收藏夹 2min
+wc.play_mini_game("跳一跳", duration_seconds=180)  # 官方小游戏约 3 分钟
 ```
 
 ---
@@ -218,7 +219,7 @@ print(resolve_profile(d).display_name)
 | 阶段 | 时长 | 核心行为 | 剧本文件 |
 |------|------|---------|---------|
 | 信任积累期 | 第 1-2 周 | **14 天冷启动分相位**（见下） | `trust_building.py` + `cold_start_templates.py` |
-| 轻度互动期 | 第 3-4 周 | 开始聊天、点赞、发圈、深聊、小程序 | `light_interact.py` |
+| 轻度互动期 | 第 3-4 周 | 开始聊天、点赞、发圈、深聊、小游戏 | `light_interact.py` |
 | 正常使用期 | 第 2-3 月 | 正常社交频率，全面互动 | `normal_use.py` |
 | 成熟期 | 3 个月后 | 自然维持，可投入测试 | `mature.py` |
 
@@ -227,9 +228,9 @@ print(resolve_profile(d).display_name)
 | 天 | 相位 | 自动化内容 | 跳过（人工） |
 |----|------|-----------|-------------|
 | 1-3 | 社交种子 | 添加种子好友（1/2/2）、每天关注 2 个公众号、读文 10 分钟、搜索、视频号、小程序、打开支付页 | 头像/昵称/绑卡/红包/线下消费 |
-| 4-7 | 内容生态 | 发圈、群发言、轻点赞、小程序 | 跳一跳需额外适配 |
+| 4-7 | 内容生态 | 发圈、群发言、轻点赞、**跳一跳等官方小游戏** | — |
 | 8-10 | 深度互动 | 限量加好友、深聊、朋友圈高频互动 | 需预填 `seed_friends` |
-| 11-14 | 场景渗透 | 视频号加长+评论、小程序、继续互动 | 真实电商下单 |
+| 11-14 | 场景渗透 | 视频号加长+评论、小游戏、继续互动 | 真实电商下单 |
 
 人设种子字段（`content/personas.py`）:
 - `public_accounts` — 关注目标
@@ -396,6 +397,6 @@ export DINGTALK_WEBHOOK=https://oapi.dingtalk.com/robot/send?access_token=xxx
 
 ---
 
-> **项目版本**: v2.4 | **更新**: 2026-08-03
+> **项目版本**: v2.5 | **更新**: 2026-08-05
 > **详细方案**: 参见 `../具体执行方案.md`
-> **本版新增**: 14 天冷启动分相位剧本、社交扩展动作、AI 上帝视角编排器
+> **本版新增**: 官方小游戏（发现→游戏→跳一跳等）、14 天冷启动分相位、AI 上帝视角编排器

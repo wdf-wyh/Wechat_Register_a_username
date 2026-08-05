@@ -42,6 +42,7 @@ WECHAT_ELEMENTS: dict[str, dict] = {
     "channels_entry":      {"text": "视频号"},
     "scan_entry":          {"text": "扫一扫"},
     "mini_program_entry":  {"text": "小程序"},
+    "games_entry":         {"text": "游戏"},
     "search_entry":        {"text": "搜一搜"},
 
     # ===== 聊天列表（微信首页） =====

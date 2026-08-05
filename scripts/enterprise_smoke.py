@@ -209,6 +209,12 @@ class EnterpriseSmoke:
             lambda: social.browse_mini_program(duration_seconds=45, keyword="美团"),
         )
 
+        # B6b 官方小游戏（发现→游戏→找游戏→立即玩，缩短）
+        await self._step_bool(
+            "play_mini_game",
+            lambda: social.play_mini_game(game_name="", duration_seconds=60),
+        )
+
         # B7 视频号短刷
         from core.channels_browser import ChannelsBrowser
 

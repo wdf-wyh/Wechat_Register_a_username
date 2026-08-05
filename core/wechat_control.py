@@ -7,7 +7,7 @@
 微信核心页面结构:
     - 聊天列表 (微信 Tab) — 消息列表
     - 通讯录 — 联系人、公众号、群聊
-    - 发现 — 朋友圈、视频号、小程序入口
+    - 发现 — 朋友圈、视频号、小程序、游戏入口
     - 我 — 个人信息、服务、收藏、设置
 
 使用方式:
@@ -521,6 +521,27 @@ class WeChatControl:
             logger.debug(f"[{self.account_id}] 打开收付款页面")
             return True
         return False
+
+    # ================================================================
+    # 官方小游戏
+    # ================================================================
+
+    def play_mini_game(
+        self,
+        game_name: str = "",
+        duration_seconds: int = 180,
+    ) -> bool:
+        """
+        打开并游玩官方小游戏。
+
+        路径: 微信首页 → 发现 → 游戏 → 找游戏 → 立即玩（失败可按 game_name 搜索）
+        """
+        from core.social_actions import SocialActions
+
+        return SocialActions(self.d, self.account_id).play_mini_game(
+            game_name=game_name,
+            duration_seconds=duration_seconds,
+        )
 
     # ================================================================
     # 收藏夹

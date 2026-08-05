@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-社交扩展动作 — 关注公众号 / 加好友 / 群聊 / 深聊 / 小程序浏览。
+社交扩展动作 — 关注公众号 / 加好友 / 群聊 / 深聊 / 小程序 / 官方小游戏。
 
 定位策略与现有模块一致：OCR + 百分比坐标 fallback。
 人工专属动作（绑卡、发红包、真实支付、改资料）不在此实现。
@@ -20,6 +20,14 @@ from config.device_profiles import get_coord
 from utils.logger import get_logger
 
 logger = get_logger("social_actions")
+
+# 官方小游戏默认池（发现→游戏→小游戏；也可经小程序搜索打开）
+DEFAULT_OFFICIAL_MINI_GAMES = (
+    "跳一跳",
+    "欢乐斗地主",
+    "天天象棋",
+    "羊了个羊",
+)
 
 
 class SocialActions:
@@ -1286,16 +1294,19 @@ class SocialActions:
             goto_tab(self.d, "discover")
             time.sleep(1.0)
 
-            # 点小程序入口
-            coord = get_coord(self.d, "mini_program_entry") or (0.32, 0.417)
-            rx, ry = coord
-            if not self._ocr_click_any(["小程序"], y_min=0.25, y_max=0.7):
-                click_ratio(self.d, rx, ry)
+            if not self._open_discover_list_entry(
+                keywords=["小程序"],
+                coord_key="mini_program_entry",
+                fallback=(0.32, 0.85),
+                success_markers=("最近使用", "我的小程序", "搜索", "常用"),
+            ):
+                logger.warning(f"[{self.account_id}] 未找到小程序入口")
+                return False
             time.sleep(2.0)
 
             if keyword:
                 # 小程序页搜索
-                if self._ocr_click_any(["搜索"], y_min=0.02, y_max=0.2):
+                if self._ocr_click_any(["搜索"], y_min=0.02, y_max=0.25):
                     time.sleep(0.8)
                     try:
                         self.d.set_input_ime(True)
@@ -1303,7 +1314,10 @@ class SocialActions:
                         self.d.set_input_ime(False)
                         self.d.press("enter")
                         time.sleep(2.0)
-                        click_ratio(self.d, 0.4, 0.25)
+                        if not self._ocr_click_any(
+                            [keyword, "小程序"], y_min=0.12, y_max=0.7
+                        ):
+                            click_ratio(self.d, 0.4, 0.25)
                         time.sleep(2.0)
                     except Exception:
                         pass
@@ -1323,12 +1337,966 @@ class SocialActions:
                 )
                 time.sleep(random.uniform(2.0, 5.0))
 
-            for _ in range(3):
-                self.d.press("back")
-                time.sleep(0.4)
+            self._exit_nested(times=3)
             return True
         except Exception as e:
             logger.error(f"[{self.account_id}] 小程序浏览失败: {e}")
+            return False
+
+    # ================================================================
+    # 官方小游戏（跳一跳等）
+    # ================================================================
+
+    def play_mini_game(
+        self,
+        game_name: str = "",
+        duration_seconds: int = 180,
+    ) -> bool:
+        """
+        打开微信官方小游戏并拟人游玩一段时间。
+
+        主路径（贴近真人）:
+          微信首页 → 发现 → 游戏 → 顶栏「找游戏」→ 点任一「立即玩」→ 停留后退出
+        兜底: 按 game_name 在游戏中心/小程序/全局搜索打开
+
+        若画面识别到「跳一跳」则长按蓄力，否则随机轻点/短滑。
+        """
+        name = (game_name or "").strip()
+        duration = max(45, int(duration_seconds))
+        logger.info(
+            f"[{self.account_id}] 玩小游戏"
+            f"{f': {name}' if name else '（找游戏·立即玩）'} ({duration}s)"
+        )
+        try:
+            # 进发现前禁止点右上角：主界面该位置是「+」不是小程序关闭
+            self._prepare_wechat_home_no_capsule()
+            opened = self._open_mini_game(name)
+            if not opened:
+                logger.warning(
+                    f"[{self.account_id}] 未能打开小游戏"
+                    f"{f': {name}' if name else ''}"
+                )
+                self._return_to_wechat_home()
+                return False
+
+            time.sleep(random.uniform(2.0, 3.5))
+            if not self._ensure_game_playable():
+                logger.warning(
+                    f"[{self.account_id}] 打开后仍在隐私/引导页，未进入可玩界面"
+                )
+                self._return_to_wechat_home()
+                return False
+
+            end = time.time() + duration
+            blob = self._ocr_screen_blob(force=True)
+            if "跳一跳" in blob or (name and "跳一跳" in name):
+                self._play_tiaoyitiao(end)
+            else:
+                self._play_generic_mini_game(end)
+
+            self._return_to_wechat_home()
+            return True
+        except Exception as e:
+            logger.error(f"[{self.account_id}] 小游戏失败: {e}")
+            try:
+                self._return_to_wechat_home()
+            except Exception:
+                pass
+            return False
+
+    def _prepare_wechat_home_no_capsule(self) -> None:
+        """回到微信会话 Tab，绝不点右上角（避免打开「+」菜单）。"""
+        start_wechat(self.d, wait=2.0, cold=False)
+        self._escape_nested_to_main(max_backs=8)
+        self._dismiss_plus_menu_if_open()
+        try:
+            goto_tab(self.d, "wechat")
+        except Exception:
+            pass
+        time.sleep(0.5)
+        self._dismiss_plus_menu_if_open()
+
+    def _escape_nested_to_main(self, max_backs: int = 8) -> bool:
+        """从游戏人生/小程序/隐私等嵌套页退到微信主 Tab，不点右上角「+」。"""
+        for i in range(max_backs):
+            blob = self._ocr_screen_blob(force=True)
+            if self._is_wechat_main_tabs(blob) or self._looks_like_chat_list(blob):
+                return True
+            if "发起群聊" in blob or "面对面建群" in blob:
+                self.d.press("back")
+                time.sleep(0.4)
+                continue
+            try:
+                pkg = (self.d.app_current() or {}).get("package", "")
+            except Exception:
+                pkg = ""
+            if pkg and pkg != "com.tencent.mm":
+                start_wechat(self.d, wait=2.0, cold=False)
+                continue
+            if self._is_game_life_auth_page(blob):
+                self._ocr_click_any(["暂不展示"], y_min=0.55, y_max=0.95)
+                time.sleep(0.4)
+                continue
+            if self._is_game_life_page(blob) or self._is_privacy_or_policy_page(blob):
+                # 优先点左上角返回，再系统 back
+                try:
+                    click_ratio(self.d, 0.06, 0.055)
+                    time.sleep(0.45)
+                except Exception:
+                    pass
+                self.d.press("back")
+                time.sleep(0.55)
+                continue
+            if self._looks_like_games_center(blob):
+                self.d.press("back")
+                time.sleep(0.5)
+                continue
+            # 其它嵌套：系统返回；偶发关胶囊
+            if i >= 4:
+                self._close_miniprogram_capsule()
+                time.sleep(0.4)
+            else:
+                self.d.press("back")
+                time.sleep(0.5)
+        start_wechat(self.d, wait=2.0, cold=False)
+        blob = self._ocr_screen_blob(force=True)
+        return self._is_wechat_main_tabs(blob) or self._looks_like_chat_list(blob)
+
+    def _is_game_life_page(self, blob: str = "") -> bool:
+        """微信「游戏人生」记录/名片页（非找游戏列表）。"""
+        text = blob or self._ocr_screen_blob()
+        if "找游戏" in text and ("朋友" in text or "圈子" in text):
+            return False
+        return "游戏人生" in text and any(
+            k in text
+            for k in (
+                "已玩游戏",
+                "游戏时长",
+                "游戏成分",
+                "微信游戏名片",
+                "暂无游戏记录",
+                "课程小助手",
+            )
+        )
+
+    def _looks_like_games_center(self, blob: str = "") -> bool:
+        """发现→游戏后的游戏中心（顶栏含找游戏）。"""
+        text = blob or self._ocr_screen_blob()
+        if self._is_game_life_page(text):
+            return False
+        return "找游戏" in text and ("朋友" in text or "圈子" in text)
+
+    def _open_mini_game(self, game_name: str) -> bool:
+        """优先：发现→游戏→找游戏→立即玩；失败再按名称搜索。"""
+        if self._open_via_games_center(game_name):
+            return True
+        if not game_name:
+            logger.info(f"[{self.account_id}] 找游戏·立即玩失败，无指定游戏名可搜索")
+            return False
+        logger.info(f"[{self.account_id}] 立即玩未成功，改走游戏名搜索: {game_name}")
+        self._prepare_wechat_home_no_capsule()
+        if self._open_via_mini_program_search(game_name):
+            return True
+        logger.info(f"[{self.account_id}] 小程序搜索未打开，改走全局搜索")
+        self._prepare_wechat_home_no_capsule()
+        return self._open_via_global_search(game_name)
+
+    def _open_via_games_center(self, game_name: str) -> bool:
+        """
+        微信首页 → 发现 → 游戏 → 顶栏找游戏 → 点「立即玩」。
+        若立即玩失败且传入 game_name，再尝试搜索该游戏。
+        """
+        self._prepare_wechat_home_no_capsule()
+        goto_tab(self.d, "discover")
+        time.sleep(1.0)
+        self._dismiss_plus_menu_if_open()
+
+        if not self._open_discover_list_entry(
+            keywords=["游戏"],
+            coord_key="games_entry",
+            fallback=(0.32, 0.78),
+            # 勿用「在玩/小游戏」：会误匹配「已玩游戏」等游戏人生文案
+            success_markers=("找游戏",),
+        ):
+            return False
+        time.sleep(2.0)
+        if not self._looks_like_games_center():
+            # 可能误进游戏人生：退后重试一次发现→游戏
+            logger.info(f"[{self.account_id}] 未进入游戏中心顶栏，尝试退出后重进")
+            self.d.press("back")
+            time.sleep(0.6)
+            goto_tab(self.d, "discover")
+            time.sleep(0.8)
+            if not self._open_discover_list_entry(
+                keywords=["游戏"],
+                coord_key="games_entry",
+                fallback=(0.32, 0.78),
+                success_markers=("找游戏",),
+            ):
+                return False
+            time.sleep(1.5)
+            if not self._looks_like_games_center():
+                return False
+
+        # 必须进顶栏「找游戏」，不能只靠圈子页右下角悬浮「立即玩」
+        if not self._switch_to_find_games_tab():
+            logger.warning(f"[{self.account_id}] 未能切换到「找游戏」Tab")
+            return False
+        time.sleep(1.0)
+
+        if self._click_play_now_any():
+            return True
+
+        if game_name:
+            if self._search_and_launch_game(game_name):
+                return True
+            return self._browse_list_for_game(game_name)
+        return False
+
+    def _switch_to_find_games_tab(self) -> bool:
+        """游戏中心顶栏：朋友 / 圈子 / 找游戏 → 切到找游戏。"""
+        for attempt in range(4):
+            if attempt < 3:
+                self._ocr_click_any(["找游戏"], y_min=0.03, y_max=0.20)
+            else:
+                # 顶栏右侧「找游戏」坐标兜底
+                click_ratio(self.d, 0.72, 0.08)
+            time.sleep(1.1)
+            blob = self._ocr_screen_blob(force=True)
+            if self._on_find_games_list(blob):
+                return True
+        return False
+
+    def _on_find_games_list(self, blob: str = "") -> bool:
+        """是否已在「找游戏」列表（而非圈子动态）。"""
+        text = blob or self._ocr_screen_blob()
+        if "立即玩" not in text:
+            return False
+        # 圈子动态流
+        if "更多圈子" in text:
+            return False
+        if "关注" in text and any(
+            k in text for k in ("条新内容", "点赞", "评论", "分享", "我家孩子")
+        ):
+            return False
+        if any(k in text for k in ("今日精选", "热门", "必玩", "排行榜", "分类", "精选")):
+            return True
+        # 顶栏有找游戏 + 列表立即玩，且不像动态流
+        return "找游戏" in text and "条新内容" not in text
+
+    def _click_play_now_any(self) -> bool:
+        """在找游戏列表里点「立即玩」（避开右下角悬浮条），必要时下滑翻页。"""
+        for _ in range(6):
+            # 列表行内按钮偏右；悬浮条多在 y>0.85，故限制 y_max
+            if self._ocr_click_any_boxed(
+                ["立即玩"],
+                y_min=0.14,
+                y_max=0.82,
+                x_min=0.40,
+                x_max=0.96,
+            ):
+                time.sleep(2.8)
+                if self._ensure_game_playable():
+                    return True
+                self._ocr_click_any_boxed(
+                    ["立即玩", "开始游戏", "进入游戏"],
+                    y_min=0.55,
+                    y_max=0.96,
+                    x_min=0.20,
+                    x_max=0.95,
+                )
+                time.sleep(2.0)
+                if self._ensure_game_playable():
+                    return True
+                if self._is_privacy_or_policy_page():
+                    self.d.press("back")
+                    time.sleep(0.6)
+                self._exit_nested(times=2)
+                time.sleep(0.6)
+                self._switch_to_find_games_tab()
+            self.d.swipe(
+                int(self.w * 0.55),
+                int(self.h * 0.75),
+                int(self.w * 0.55),
+                int(self.h * 0.35),
+                duration=0.35,
+            )
+            time.sleep(0.8)
+        return False
+
+    def _open_via_mini_program_search(self, game_name: str) -> bool:
+        start_wechat(self.d, wait=3.0, cold=False)
+        goto_tab(self.d, "discover")
+        time.sleep(1.0)
+        if not self._open_discover_list_entry(
+            keywords=["小程序"],
+            coord_key="mini_program_entry",
+            fallback=(0.32, 0.85),
+            success_markers=("最近使用", "我的小程序", "搜索", "常用"),
+        ):
+            return False
+        time.sleep(2.0)
+        return self._search_and_launch_game(
+            game_name,
+            launch_keywords=[game_name, "进入", "打开"],
+        )
+
+    def _open_via_global_search(self, game_name: str) -> bool:
+        """顶部搜索 / SearchHelper 打开小游戏。"""
+        try:
+            from core.search_helper import SearchHelper
+
+            helper = SearchHelper(self.d, account_id=self.account_id)
+            if not helper.search(game_name):
+                # 发现页右上角搜索图标兜底
+                start_wechat(self.d, wait=2.0, cold=False)
+                goto_tab(self.d, "discover")
+                time.sleep(0.8)
+                if not self._ocr_click_any(["搜索"], y_min=0.02, y_max=0.12):
+                    click_ratio(self.d, 0.82, 0.055)
+                time.sleep(0.8)
+                try:
+                    self.d.set_input_ime(True)
+                    self.d.send_keys(game_name)
+                    self.d.set_input_ime(False)
+                    self.d.press("enter")
+                    time.sleep(2.0)
+                except Exception:
+                    return False
+
+            time.sleep(1.5)
+            # 优先点小游戏/小程序分区结果
+            if self._ocr_click_any(
+                [game_name, "小游戏", "小程序"],
+                y_min=0.12,
+                y_max=0.85,
+            ):
+                time.sleep(2.5)
+                self._ocr_click_any(
+                    ["立即玩", "开始游戏", "进入", "打开"],
+                    y_min=0.35,
+                    y_max=0.95,
+                )
+                time.sleep(2.0)
+                return self._ensure_game_playable()
+            return False
+        except Exception as e:
+            logger.debug(f"[{self.account_id}] 全局搜索打开小游戏失败: {e}")
+            return False
+
+    def _search_and_launch_game(
+        self,
+        game_name: str,
+        launch_keywords: Optional[list[str]] = None,
+    ) -> bool:
+        launch_keywords = launch_keywords or [
+            "立即玩",
+            "开始游戏",
+            "进入",
+            game_name,
+        ]
+        searched = False
+        if self._ocr_click_any(["搜索", "搜一搜"], y_min=0.02, y_max=0.28):
+            time.sleep(0.7)
+            try:
+                self.d.set_input_ime(True)
+                self.d.send_keys(game_name)
+                self.d.set_input_ime(False)
+                self.d.press("enter")
+                searched = True
+                time.sleep(2.0)
+            except Exception as e:
+                logger.debug(f"[{self.account_id}] 小游戏搜索输入失败: {e}")
+
+        if not searched:
+            return False
+
+        if self._ocr_click_any(launch_keywords, y_min=0.12, y_max=0.85):
+            time.sleep(2.5)
+            return self._ensure_game_playable()
+
+        # 点第一条结果后再找「立即玩」
+        click_ratio(self.d, 0.42, 0.28)
+        time.sleep(2.0)
+        self._ocr_click_any(["立即玩", "开始游戏", "进入", "打开"], y_min=0.35, y_max=0.95)
+        time.sleep(2.0)
+        return self._ensure_game_playable()
+
+    def _browse_list_for_game(self, game_name: str) -> bool:
+        for _ in range(5):
+            if self._ocr_click_any(
+                [game_name, "立即玩"],
+                y_min=0.18,
+                y_max=0.92,
+            ):
+                time.sleep(2.0)
+                self._ocr_click_any(["立即玩", "开始游戏"], y_min=0.35, y_max=0.95)
+                time.sleep(1.5)
+                if self._ensure_game_playable():
+                    return True
+            self.d.swipe(
+                int(self.w * 0.55),
+                int(self.h * 0.75),
+                int(self.w * 0.55),
+                int(self.h * 0.35),
+                duration=0.35,
+            )
+            time.sleep(0.8)
+        return False
+
+    def _open_discover_list_entry(
+        self,
+        keywords: list[str],
+        coord_key: str,
+        fallback: tuple[float, float],
+        success_markers: tuple[str, ...] = (),
+    ) -> bool:
+        """
+        发现页列表入口：OCR 优先；找不到则上滑再试；最后百分比坐标。
+        新版发现页项较多，「游戏/小程序」常在中下部。
+        若提供 success_markers，点后必须命中其一，避免旧坐标误进其它页。
+        """
+        for attempt in range(4):
+            if self._ocr_click_any(keywords, y_min=0.12, y_max=0.92):
+                time.sleep(1.2)
+                if not success_markers or self._ocr_has_any(list(success_markers)):
+                    return True
+                # 误点，退回发现页再试
+                self.d.press("back")
+                time.sleep(0.6)
+                goto_tab(self.d, "discover")
+                time.sleep(0.6)
+            if attempt < 3:
+                self.d.swipe(
+                    int(self.w * 0.5),
+                    int(self.h * 0.72),
+                    int(self.w * 0.5),
+                    int(self.h * 0.35),
+                    duration=0.35,
+                )
+                time.sleep(0.7)
+
+        coord = get_coord(self.d, coord_key) or fallback
+        click_ratio(self.d, coord[0], coord[1])
+        time.sleep(1.5)
+        if success_markers:
+            if self._ocr_has_any(list(success_markers)):
+                return True
+            # 坐标可能过时：仍在发现页则再 OCR 一次；否则回退
+            blob_ok = self._ocr_has_any(["朋友圈", "视频号", "扫一扫"])
+            if blob_ok and self._ocr_click_any(keywords, y_min=0.12, y_max=0.92):
+                time.sleep(1.2)
+                return (not success_markers) or self._ocr_has_any(list(success_markers))
+            self.d.press("back")
+            time.sleep(0.4)
+            return False
+        return True
+
+    def _looks_like_game_opened(self, game_name: str) -> bool:
+        """粗判已离开发现/游戏中心列表，进入可玩小游戏界面。"""
+        time.sleep(0.4)
+        blob = self._ocr_screen_blob(force=True)
+        if self._is_privacy_or_policy_page(blob):
+            return False
+        if self._is_privacy_consent_dialog(blob):
+            return False
+        if self._is_game_life_auth_page(blob):
+            return False
+        if self._is_game_life_page(blob):
+            return False
+        if self._is_wechat_main_tabs(blob) or self._looks_like_chat_list(blob):
+            return False
+        # 仍在发现页
+        if "朋友圈" in blob and "视频号" in blob:
+            return False
+        # 仍在游戏中心列表/圈子
+        if any(k in blob for k in ("找游戏", "今日精选", "在玩", "更多圈子")) and (
+            "立即玩" in blob or "关注" in blob
+        ):
+            return False
+        positive = (
+            game_name,
+            "开始游戏",
+            "再玩一次",
+            "重新开始",
+            "再来一局",
+            "得分",
+            "本局",
+            "排行",
+            "跳一跳",
+        )
+        if any(p and p in blob for p in positive):
+            return True
+        # 负向：明显非游戏运行页
+        negative = (
+            "你的权益",
+            "隐私保护",
+            "隐私政策",
+            "发起群聊",
+            "通讯录",
+            "收付款",
+            "朋友圈",
+            "视频号",
+        )
+        if any(k in blob for k in negative):
+            return False
+        # 已离开游戏中心导航，且无明显非游戏文案 → 视为已进入
+        if not any(k in blob for k in ("找游戏", "在玩", "今日精选", "更多圈子")):
+            return True
+        return False
+
+    def _is_privacy_or_policy_page(self, blob: str = "") -> bool:
+        """小程序隐私保护全文页（非可玩界面；同意弹层不算）。"""
+        text = blob or self._ocr_screen_blob()
+        # 全文页特有章节（弹层通常只有「隐私保护指引」链接）
+        if any(
+            k in text
+            for k in (
+                "你的权益",
+                "收集的信息",
+                "如何管理你授权",
+                "信息的用途",
+                "开发者处理的信息",
+            )
+        ):
+            return True
+        # 标题全文：有「小程序隐私保护」但没有同意/拒绝按钮 → 全文页
+        if "小程序隐私保护" in text:
+            if any(k in text for k in ("同意并继续", "允许", "拒绝", "不同意")):
+                # 弹层链接文案也含「小程序隐私保护指引」
+                return False
+            return True
+        if "隐私政策" in text and "同意并继续" not in text and "允许" not in text:
+            if any(k in text for k in ("个人信息", "收集", "存储")):
+                return True
+        return False
+
+    def _is_privacy_consent_dialog(self, blob: str = "") -> bool:
+        """开局隐私/权限同意弹层（有同意/允许按钮，非全文页）。"""
+        text = blob or self._ocr_screen_blob()
+        if self._is_privacy_or_policy_page(text):
+            return False
+        has_btn = any(k in text for k in ("同意并继续", "允许", "同意", "拒绝"))
+        has_hint = any(
+            k in text for k in ("隐私", "权限", "获取你的", "使用你的", "用户协议")
+        )
+        return has_btn and has_hint
+
+    def _is_game_life_auth_page(self, blob: str = "") -> bool:
+        """游戏人生「展示游戏实力」授权弹窗。"""
+        text = blob or self._ocr_screen_blob()
+        return any(
+            k in text
+            for k in (
+                "开启授权",
+                "暂不展示",
+                "游戏实力",
+                "游戏成分",
+            )
+        )
+
+    def _looks_like_chat_list(self, blob: str = "") -> bool:
+        """微信会话列表（有标题「微信」且底部 Tab）。"""
+        text = blob or self._ocr_screen_blob()
+        if "发起群聊" in text or "面对面建群" in text:
+            return False
+        title = "微信" in text
+        tabs = ("通讯录" in text and "发现" in text)
+        return bool(title and tabs)
+
+    def _is_wechat_main_tabs(self, blob: str = "") -> bool:
+        """底部主 Tab 可见（会话/通讯录/发现/我）。"""
+        text = blob or self._ocr_screen_blob()
+        tab_hits = sum(
+            1 for k in ("微信", "通讯录", "发现", "我") if k in text
+        )
+        return tab_hits >= 2 or ("通讯录" in text and "发现" in text)
+
+    def _dismiss_plus_menu_if_open(self) -> None:
+        """若误开首页右上角「+」菜单则关掉（勿用「扫一扫」：发现页列表也有）。"""
+        blob = self._ocr_screen_blob(force=True)
+        # 「发起群聊/面对面建群」基本只出现在「+」弹层
+        if "发起群聊" in blob or "面对面建群" in blob:
+            logger.info(f"[{self.account_id}] 检测到「+」菜单，按返回关闭")
+            self.d.press("back")
+            time.sleep(0.4)
+            return
+        if "添加朋友" in blob and "收付款" in blob:
+            logger.info(f"[{self.account_id}] 检测到「+」菜单，按返回关闭")
+            self.d.press("back")
+            time.sleep(0.4)
+
+    def _click_consent_agree(self) -> bool:
+        """点同意/允许，避开「隐私保护指引」链接文案。"""
+        # 优先长文案按钮，且限制在下半屏中部偏右（按钮区）
+        for keys in (
+            ["同意并继续"],
+            ["允许"],
+            ["同意"],
+            ["我知道了"],
+        ):
+            if self._ocr_click_any_boxed(
+                keys,
+                y_min=0.62,
+                y_max=0.98,
+                x_min=0.35,
+                x_max=0.95,
+                avoid_substrings=("隐私", "指引", "政策", "协议"),
+            ):
+                return True
+        return False
+
+    def _ensure_game_playable(self) -> bool:
+        """
+        处理开局弹层与隐私页，直到进入可玩界面。
+        隐私全文页只按返回；同意弹层只点下半区按钮，避免点进政策链接。
+        """
+        for _ in range(8):
+            blob = self._ocr_screen_blob(force=True)
+
+            if self._is_privacy_or_policy_page(blob):
+                logger.info(f"[{self.account_id}] 检测到隐私全文页，返回")
+                self.d.press("back")
+                time.sleep(0.8)
+                continue
+
+            if self._is_privacy_consent_dialog(blob):
+                logger.info(f"[{self.account_id}] 检测到隐私同意弹层，点击同意")
+                if not self._click_consent_agree():
+                    # 点不到则不要乱点链接，返回重试下一个游戏
+                    return False
+                time.sleep(1.2)
+                continue
+
+            if self._is_game_life_auth_page(blob):
+                self._ocr_click_any(["暂不展示"], y_min=0.55, y_max=0.95)
+                time.sleep(0.6)
+                continue
+
+            self._dismiss_game_overlays()
+            blob2 = self._ocr_screen_blob(force=True)
+            if (
+                self._is_privacy_or_policy_page(blob2)
+                or self._is_privacy_consent_dialog(blob2)
+                or self._is_game_life_auth_page(blob2)
+            ):
+                continue
+            if self._looks_like_game_opened(""):
+                return True
+            time.sleep(0.5)
+        return False
+
+    def _ensure_wechat_home(self, close_capsule: bool = True) -> None:
+        """从嵌套小程序/游戏页退回微信主界面（默认落到会话 Tab）。"""
+        blob = self._ocr_screen_blob(force=True)
+        already_main = self._is_wechat_main_tabs(blob) or self._looks_like_chat_list(
+            blob
+        )
+        # 已在主界面时禁止点右上角：那是「+」不是小程序关闭
+        if close_capsule and not already_main:
+            self._close_miniprogram_capsule()
+        if not already_main:
+            for _ in range(4):
+                blob = self._ocr_screen_blob(force=True)
+                if self._is_wechat_main_tabs(blob) or self._looks_like_chat_list(blob):
+                    break
+                if self._is_game_life_auth_page(blob):
+                    self._ocr_click_any(["暂不展示"], y_min=0.55, y_max=0.95)
+                    time.sleep(0.4)
+                    continue
+                if self._is_privacy_or_policy_page(blob):
+                    self.d.press("back")
+                    time.sleep(0.4)
+                    continue
+                self.d.press("back")
+                time.sleep(0.45)
+        self._dismiss_plus_menu_if_open()
+        try:
+            start_wechat(self.d, wait=1.5, cold=False)
+            goto_tab(self.d, "wechat")
+        except Exception:
+            pass
+        self._dismiss_plus_menu_if_open()
+
+    def _return_to_wechat_home(self) -> None:
+        """小游戏结束后强制回到微信会话首页。"""
+        for _ in range(3):
+            blob = self._ocr_screen_blob(force=True)
+            if self._is_game_life_auth_page(blob):
+                if not self._ocr_click_any(["暂不展示"], y_min=0.55, y_max=0.95):
+                    self.d.press("back")
+                time.sleep(0.5)
+                continue
+            if self._is_privacy_or_policy_page(blob):
+                self.d.press("back")
+                time.sleep(0.5)
+                continue
+            break
+
+        self._escape_nested_to_main(max_backs=8)
+        self._dismiss_plus_menu_if_open()
+        try:
+            start_wechat(self.d, wait=2.0, cold=False)
+            goto_tab(self.d, "wechat")
+            time.sleep(0.6)
+        except Exception:
+            try:
+                goto_tab(self.d, "wechat")
+            except Exception:
+                pass
+        self._dismiss_plus_menu_if_open()
+        # 仍在游戏人生则再退一轮
+        blob = self._ocr_screen_blob(force=True)
+        if self._is_game_life_page(blob) or not (
+            self._is_wechat_main_tabs(blob) or self._looks_like_chat_list(blob)
+        ):
+            self._escape_nested_to_main(max_backs=6)
+            try:
+                start_wechat(self.d, wait=1.5, cold=False)
+                goto_tab(self.d, "wechat")
+            except Exception:
+                pass
+            self._dismiss_plus_menu_if_open()
+
+    def _close_miniprogram_capsule(self) -> None:
+        """点小程序右上角关闭（胶囊 X）。主界面/会话列表/游戏人生禁止乱点（会点到「+」或设置）。"""
+        blob = self._ocr_screen_blob(force=True)
+        if self._is_wechat_main_tabs(blob) or self._looks_like_chat_list(blob):
+            logger.debug(f"[{self.account_id}] 主界面，跳过关胶囊（防误点+）")
+            return
+        if "发起群聊" in blob or "面对面建群" in blob:
+            self.d.press("back")
+            time.sleep(0.3)
+            return
+        # 游戏人生有返回箭头，优先 back，避免点到右上角设置
+        if self._is_game_life_page(blob):
+            self.d.press("back")
+            time.sleep(0.45)
+            return
+        for rx, ry in ((0.94, 0.052), (0.97, 0.055)):
+            try:
+                click_ratio(self.d, rx, ry)
+                time.sleep(0.45)
+            except Exception:
+                pass
+            self._dismiss_plus_menu_if_open()
+            blob2 = self._ocr_screen_blob(force=True)
+            if self._is_wechat_main_tabs(blob2) or self._looks_like_chat_list(blob2):
+                return
+            if self._is_privacy_or_policy_page(blob2) or self._is_game_life_page(blob2):
+                self.d.press("back")
+                time.sleep(0.4)
+                return
+            break
+
+    def _dismiss_game_overlays(self) -> None:
+        """关闭开局弹层 / 权限 / 引导。同意类只点下半屏按钮，避免点进隐私链接。"""
+        for _ in range(3):
+            blob = self._ocr_screen_blob(force=True)
+            if self._is_privacy_or_policy_page(blob):
+                self.d.press("back")
+                time.sleep(0.6)
+                break
+            if self._is_privacy_consent_dialog(blob):
+                clicked = self._click_consent_agree()
+            else:
+                # 广告「进入小游戏」不要点，优先关引导/点本局开始
+                clicked = self._ocr_click_any_boxed(
+                    [
+                        "开始游戏",
+                        "我知道了",
+                        "跳过",
+                        "关闭",
+                        "确认",
+                        "暂不展示",
+                    ],
+                    y_min=0.40,
+                    y_max=0.95,
+                    x_min=0.10,
+                    x_max=0.90,
+                    avoid_substrings=("隐私", "指引", "政策", "广告"),
+                )
+            if not clicked:
+                clicked = self._ocr_click_any_boxed(
+                    ["开始"],
+                    y_min=0.58,
+                    y_max=0.95,
+                    x_min=0.25,
+                    x_max=0.85,
+                    avoid_substrings=("隐私",),
+                )
+            if not clicked:
+                break
+            time.sleep(0.8)
+
+    def _play_tiaoyitiao(self, end_ts: float) -> None:
+        """跳一跳：屏幕下半区长按蓄力跳跃。"""
+        logger.info(f"[{self.account_id}] 跳一跳拟人游玩中…")
+        jumps = 0
+        while time.time() < end_ts:
+            if jumps == 0 or jumps % 3 == 0:
+                blob = self._ocr_screen_blob(force=True)
+                if self._is_privacy_or_policy_page(blob) or self._is_privacy_consent_dialog(
+                    blob
+                ):
+                    if not self._ensure_game_playable():
+                        logger.warning(
+                            f"[{self.account_id}] 跳一跳中误入隐私页，提前结束"
+                        )
+                        return
+            # 结束后重新开局
+            if jumps > 0 and jumps % random.randint(6, 12) == 0:
+                self._ocr_click_any(
+                    ["再玩一次", "重新开始", "再来一局", "开始游戏"],
+                    y_min=0.40,
+                    y_max=0.95,
+                )
+                time.sleep(random.uniform(0.8, 1.5))
+
+            x = int(self.w * random.uniform(0.42, 0.58))
+            y = int(self.h * random.uniform(0.58, 0.78))
+            # 蓄力时长：短跳~中跳，偶发长跳
+            if random.random() < 0.12:
+                hold_ms = int(random.uniform(900, 1500))
+            else:
+                hold_ms = int(random.uniform(280, 950))
+            self._hold_tap(x, y, hold_ms)
+            jumps += 1
+            time.sleep(random.uniform(1.1, 2.6))
+            # 偶发停顿看成绩
+            if random.random() < 0.08:
+                time.sleep(random.uniform(1.5, 3.5))
+        logger.info(f"[{self.account_id}] 跳一跳结束，约 {jumps} 次跳跃")
+
+    def _play_generic_mini_game(self, end_ts: float) -> None:
+        """通用小游戏：随机轻点 + 短滑；禁止点隐私链接。"""
+        logger.info(f"[{self.account_id}] 通用小游戏拟人游玩中…")
+        tick = 0
+        while time.time() < end_ts:
+            tick += 1
+            if tick == 1 or tick % 3 == 0:
+                blob = self._ocr_screen_blob(force=True)
+                if (
+                    self._is_privacy_or_policy_page(blob)
+                    or self._is_privacy_consent_dialog(blob)
+                    or self._is_game_life_auth_page(blob)
+                ):
+                    if not self._ensure_game_playable():
+                        logger.warning(
+                            f"[{self.account_id}] 游玩中无法回到游戏界面，提前结束"
+                        )
+                        return
+            action = random.random()
+            if action < 0.55:
+                click_ratio(
+                    self.d,
+                    random.uniform(0.25, 0.75),
+                    random.uniform(0.40, 0.78),
+                )
+            elif action < 0.85:
+                self.d.swipe(
+                    int(self.w * random.uniform(0.3, 0.7)),
+                    int(self.h * random.uniform(0.45, 0.7)),
+                    int(self.w * random.uniform(0.3, 0.7)),
+                    int(self.h * random.uniform(0.3, 0.55)),
+                    duration=random.uniform(0.15, 0.4),
+                )
+            else:
+                self._ocr_click_any_boxed(
+                    ["继续", "再来一局", "再玩一次", "确定"],
+                    y_min=0.50,
+                    y_max=0.95,
+                    x_min=0.20,
+                    x_max=0.85,
+                    avoid_substrings=("隐私", "同意", "指引"),
+                )
+            time.sleep(random.uniform(1.2, 3.5))
+
+    def _hold_tap(self, x: int, y: int, hold_ms: int) -> None:
+        """定长按压（跳一跳蓄力）；优先 adb swipe 同点。"""
+        hold_ms = max(120, min(int(hold_ms), 2500))
+        try:
+            self.d.shell(f"input swipe {x} {y} {x} {y} {hold_ms}")
+            return
+        except Exception:
+            pass
+        try:
+            self.d.swipe(x, y, x, y, duration=hold_ms / 1000.0)
+        except Exception:
+            try:
+                self.d.long_click(x, y, duration=hold_ms / 1000.0)
+            except Exception as e:
+                logger.debug(f"[{self.account_id}] 长按失败: {e}")
+
+    def _exit_nested(self, times: int = 3) -> None:
+        for _ in range(times):
+            try:
+                self.d.press("back")
+            except Exception:
+                break
+            time.sleep(0.4)
+
+    def _ocr_click_any_boxed(
+        self,
+        keywords: list[str],
+        y_min: float = 0.05,
+        y_max: float = 0.95,
+        x_min: float = 0.0,
+        x_max: float = 1.0,
+        avoid_substrings: tuple[str, ...] = (),
+    ) -> bool:
+        """OCR 点击，限制矩形区域，并可避开含敏感子串的匹配（如隐私链接）。"""
+        reader = self._ensure_ocr()
+        if reader is None:
+            return False
+        try:
+            img = np.array(self.d.screenshot(format="pillow"))
+            gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+            if self._clahe is not None:
+                gray = self._clahe.apply(gray)
+            results = reader.readtext(cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR))
+            y0, y1 = int(self.h * y_min), int(self.h * y_max)
+            x0, x1 = int(self.w * x_min), int(self.w * x_max)
+            best = None  # (score, cx, cy)
+            for bbox, text, conf in results:
+                if conf < 0.35:
+                    continue
+                t = (text or "").strip()
+                if not t:
+                    continue
+                if avoid_substrings and any(a in t for a in avoid_substrings):
+                    continue
+                cy = int((bbox[0][1] + bbox[2][1]) / 2)
+                cx = int((bbox[0][0] + bbox[2][0]) / 2)
+                if cy < y0 or cy > y1 or cx < x0 or cx > x1:
+                    continue
+                hit_score = 0
+                for k in keywords:
+                    if not k:
+                        continue
+                    if t == k:
+                        hit_score = len(k) + 5
+                        break
+                    if k in t:
+                        hit_score = len(k)
+                        break
+                    if t in k and len(t) >= max(2, len(k) // 2):
+                        hit_score = len(t)
+                        break
+                if hit_score <= 0:
+                    continue
+                if best is None or hit_score > best[0] or (
+                    hit_score == best[0] and cy < best[2]
+                ):
+                    best = (hit_score, cx, cy)
+            if best is None:
+                return False
+            self.d.click(best[1], best[2])
+            self._invalidate_ocr_cache()
+            time.sleep(0.5)
+            return True
+        except Exception as e:
+            logger.debug(f"[{self.account_id}] _ocr_click_any_boxed 失败: {e}")
             return False
 
     # ================================================================

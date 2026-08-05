@@ -25,7 +25,9 @@ PROFILE = DeviceProfile(
         "channels_entry": (0.32, 0.207),
         "scan_entry": (0.32, 0.277),
         "search_entry": (0.32, 0.347),
-        "mini_program_entry": (0.32, 0.417),
+        # 新版发现页「游戏/小程序」在列表底部（OCR 优先，坐标仅兜底）
+        "games_entry": (0.32, 0.78),
+        "mini_program_entry": (0.32, 0.85),
         # 聊天
         "search_btn": (0.736, 0.058),
         "chat_input_box": (0.50, 0.965),

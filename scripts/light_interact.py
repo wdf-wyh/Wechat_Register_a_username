@@ -41,8 +41,8 @@ class LightInteractScript(BaseScript):
                 Action(ActionType.GLOBAL_SEARCH, "13:30", "15:00", (60, 180)),
                 # 15:00 - 与好友聊天（图片分享）
                 Action(ActionType.SEND_IMAGE, "14:30", "16:00", (60, 180)),
-                Action(ActionType.BROWSE_MINI_PROGRAM, "15:00", "16:00", (90, 180),
-                       params={"duration": 150}),
+                Action(ActionType.PLAY_MINI_GAME, "15:00", "16:00", (90, 180),
+                       params={"game": "跳一跳", "duration": 150}),
                 Action(ActionType.BROWSE_FAVORITES, "15:30", "17:00", (120, 300)),
                 # 17:00 - 打开支付页面
                 Action(ActionType.MAKE_PAYMENT, "16:30", "18:00", (60, 300)),
@@ -81,6 +81,8 @@ class LightInteractScript(BaseScript):
                 # 14:00 - 视频号约 10 分钟（完播 + 评论）
                 Action(ActionType.SCROLL_CHANNELS, "13:00", "15:00", (600, 720),
                        params=channels_daily_params(600)),
+                Action(ActionType.PLAY_MINI_GAME, "14:30", "16:00", (120, 240),
+                       params={"game": "跳一跳", "duration": 180}),
                 # 15:30 - 阅读文章
                 Action(ActionType.READ_ARTICLE, "15:00", "17:00", (300, 600)),
                 Action(ActionType.FAVORITE_ARTICLE, "15:30", "17:00", (30, 120)),

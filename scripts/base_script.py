@@ -50,6 +50,7 @@ class ActionType(Enum):
     GROUP_CHAT = "group_chat"
     ADD_FRIEND = "add_friend"
     BROWSE_MINI_PROGRAM = "browse_mini_program"
+    PLAY_MINI_GAME = "play_mini_game"
     MAKE_PAYMENT = "make_payment"
     OPEN_FAVORITES = "open_favorites"
     BROWSE_FAVORITES = "browse_favorites"
@@ -149,6 +150,7 @@ class BaseScript(ABC):
             ActionType.GROUP_CHAT:       self._handle_group_chat,
             ActionType.ADD_FRIEND:       self._handle_add_friend,
             ActionType.BROWSE_MINI_PROGRAM: self._handle_browse_mini_program,
+            ActionType.PLAY_MINI_GAME:   self._handle_play_mini_game,
             ActionType.MAKE_PAYMENT:     self._handle_make_payment,
             ActionType.OPEN_FAVORITES:   self._handle_open_favorites,
             ActionType.BROWSE_FAVORITES: self._handle_browse_favorites,
@@ -520,8 +522,12 @@ class BaseScript(ABC):
         if not keyword:
             from content.search_keywords import SearchKeywordManager
             category = params.get("keyword_category")
-            # 兼容模板里的 mini_program 类别名
-            cat_map = {"mini_program": "小程序"}
+            # 兼容模板里的类别别名
+            cat_map = {
+                "mini_program": "小程序",
+                "mini_game": "小游戏",
+                "play_mini_game": "小游戏",
+            }
             if category in cat_map:
                 category = cat_map[category]
             keyword = SearchKeywordManager().get_random_keyword(
@@ -791,6 +797,22 @@ class BaseScript(ABC):
         return SocialActions(self.wc.d, self.account_id).browse_mini_program(
             duration_seconds=int(duration),
             keyword=keyword,
+        )
+
+    def _handle_play_mini_game(self, params: dict) -> bool:
+        """玩官方小游戏（跳一跳等）"""
+        from core.social_actions import SocialActions
+        from content.search_keywords import SearchKeywordManager
+
+        duration = params.get("duration", 180)
+        game = params.get("game") or params.get("keyword") or ""
+        if not game and params.get("random_game", True):
+            game = SearchKeywordManager().get_random_keyword(
+                self.persona, category="小游戏"
+            )
+        return SocialActions(self.wc.d, self.account_id).play_mini_game(
+            game_name=str(game or "跳一跳"),
+            duration_seconds=int(duration),
         )
 
     def _handle_make_payment(self, params: dict) -> bool:
