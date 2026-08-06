@@ -456,8 +456,8 @@ class MomentPoster:
     def _get_ocr(self):
         """获取 EasyOCR 实例（延迟加载）。"""
         if self._ocr is None:
-            import easyocr
-            self._ocr = easyocr.Reader(['ch_sim', 'en'], gpu=False)
+            from utils.ocr_utils import create_easyocr_reader
+            self._ocr = create_easyocr_reader()
         return self._ocr
 
     def _ocr_region(self, img_bgr, x0, y0, x1, y1):

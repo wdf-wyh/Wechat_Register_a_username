@@ -114,6 +114,9 @@ class Settings:
     USE_AI_GOD_PLANNER: bool = True        # True=LLM 编排当日剧本，失败回退规则模板
     AI_PLANNER_FALLBACK_TO_TEMPLATE: bool = True
 
+    # ===== OCR =====
+    OCR_USE_GPU: bool = True                 # EasyOCR 是否尝试使用 GPU（需 CUDA 版 PyTorch）
+
     # ===== 监控 =====
     PROMETHEUS_PORT: int = 9090
     HEALTH_CHECK_INTERVAL: float = 3600.0  # 账号健康检查间隔（秒）
@@ -152,6 +155,9 @@ class Settings:
         flag = os.getenv("USE_AI_GOD_PLANNER")
         if flag is not None:
             self.USE_AI_GOD_PLANNER = flag.strip().lower() in ("1", "true", "yes", "on")
+        ocr_gpu = os.getenv("OCR_USE_GPU")
+        if ocr_gpu is not None:
+            self.OCR_USE_GPU = ocr_gpu.strip().lower() in ("1", "true", "yes", "on")
 
 
 # 全局单例

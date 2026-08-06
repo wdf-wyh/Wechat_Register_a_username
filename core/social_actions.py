@@ -2427,9 +2427,9 @@ class SocialActions:
 
     def _ensure_ocr(self):
         if self._ocr is None:
-            import easyocr
+            from utils.ocr_utils import create_easyocr_reader
 
-            self._ocr = easyocr.Reader(["ch_sim", "en"], gpu=False)
+            self._ocr = create_easyocr_reader()
             self._clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         return self._ocr
 

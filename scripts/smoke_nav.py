@@ -19,8 +19,9 @@ def main():
     goto_tab(d, "discover")
     time.sleep(1)
 
-    import easyocr, cv2, numpy as np
-    reader = easyocr.Reader(["ch_sim", "en"], gpu=False)
+    import cv2, numpy as np
+    from utils.ocr_utils import create_easyocr_reader
+    reader = create_easyocr_reader()
 
     def enhance(g):
         return cv2.createCLAHE(3.0, (8, 8)).apply(g)

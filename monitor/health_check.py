@@ -375,8 +375,8 @@ class AccountHealthChecker:
 
     def _ocr(self):
         if not hasattr(self, '_ocr_instance'):
-            import easyocr
-            self._ocr_instance = easyocr.Reader(['ch_sim', 'en'], gpu=False)
+            from utils.ocr_utils import create_easyocr_reader
+            self._ocr_instance = create_easyocr_reader()
         return self._ocr_instance
 
 
