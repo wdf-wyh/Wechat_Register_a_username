@@ -99,7 +99,7 @@ def run_smoke(contact: str, serial: str | None = None) -> dict:
     if not opened:
         return _summary(results)
 
-    ocr_history = reader.read_messages(contact_name=contact, scroll_up=1)
+    ocr_history = reader.read_messages_with_voice(contact_name=contact, scroll_up=1)
     record("ocr_read_history", True, f"读到 {len(ocr_history)} 条可见消息")
 
     reply = llm.generate_chat_reply_from_history(
@@ -129,8 +129,14 @@ def run_smoke(contact: str, serial: str | None = None) -> dict:
 
     while time.time() < end_at and sent_count < MIN_SEND_COUNT:
         time.sleep(20)
-        ocr_history = reader.read_messages(contact_name=contact, scroll_up=0)
+        ocr_history = reader.read_messages_with_voice(contact_name=contact, scroll_up=1)
         history = merge_sent_with_ocr(ocr_history, sent_log)
+        recent = history[-6:]
+        friend_msgs = [h for h in recent if h.get("role") == "friend"]
+        last = history[-1] if history else None
+        if last and last.get("role") == "self" and not friend_msgs:
+            print("  [INFO] 等对方回复，跳过本轮")
+            continue
         next_reply = llm.generate_chat_reply_from_history(
             persona=persona,
             contact=contact,

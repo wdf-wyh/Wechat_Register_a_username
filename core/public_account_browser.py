@@ -1763,7 +1763,7 @@ class PublicAccountBrowser:
         self.d.press("back")
         time.sleep(1.2)
         wc = WeChatControl(self.d, Humanizer(), account_id=self.account_id)
-        return wc.post_moment(text)
+        return wc.post_moment(text, smart_select=False)
 
     # ================================================================
     # 工具

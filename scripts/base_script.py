@@ -391,17 +391,29 @@ class BaseScript(ABC):
         return result.get("liked", 0) > 0 or result.get("commented", 0) > 0
 
     def _handle_post_moment(self, params: dict) -> bool:
-        """发朋友圈（LLM 优先，模板降级）"""
+        """发朋友圈：Vision 智能选图 + 图文配文（可降级）"""
         text = params.get("text", "")
         topic = params.get("topic", "日常")
-        if not text:
-            try:
-                from content.llm_client import LLMClient
-                text = LLMClient().generate_post_text(self.persona, topic=topic)
-            except Exception:
-                from content.post_templates import PostTemplateManager
-                text = PostTemplateManager().get_random_post(self.persona)
-        return self.wc.post_moment(text)
+        image_count = params.get("image_count")
+        smart_select = params.get("smart_select", True)
+
+        # 显式给了文案时，仍可做智能选图，但不覆盖文案
+        if text:
+            return self.wc.post_moment(
+                text=text,
+                image_count=image_count,
+                persona=self.persona,
+                smart_select=smart_select,
+                topic=topic,
+            )
+
+        return self.wc.post_moment(
+            text="",
+            image_count=image_count,
+            persona=self.persona,
+            smart_select=smart_select,
+            topic=topic,
+        )
 
     def _handle_scroll_channels(self, params: dict) -> bool:
         """刷视频号：默认约 10 分钟完播观看，可按概率点赞/评论。"""

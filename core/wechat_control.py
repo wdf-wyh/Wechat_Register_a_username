@@ -215,12 +215,19 @@ class WeChatControl:
             like_rate=like_rate,
         )
 
-    def post_moment(self, text: str, image_count: int = None,
-                    photo_index: int = 0) -> bool:
+    def post_moment(
+        self,
+        text: str = "",
+        image_count: int = None,
+        photo_index: int = 0,
+        persona: dict = None,
+        smart_select: bool = True,
+        topic: str = "日常",
+    ) -> bool:
         """
         发朋友圈（配图+文字）。
 
-        使用 OCR + OpenCV + ADBKeyboard IME 混合方案。
+        默认开启智能选图：Vision 过滤截图/二维码等，并按选中图片生成配文。
         """
         from core.moment_poster import MomentPoster
 
@@ -229,8 +236,14 @@ class WeChatControl:
             image_count = random.randint(1, 3)
 
         poster = MomentPoster(self.d, account_id=self.account_id)
-        return poster.post(text=text, photo_index=photo_index,
-                           photo_count=image_count)
+        return poster.post(
+            text=text,
+            photo_index=photo_index,
+            photo_count=image_count,
+            persona=persona,
+            smart_select=smart_select,
+            topic=topic,
+        )
 
     # ================================================================
     # 聊天操作

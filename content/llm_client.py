@@ -34,6 +34,39 @@ import json
 
 logger = get_logger("llm_client")
 
+# 深聊防幻觉：检测虚构的分享/视频话术
+_SHARE_VIDEO_PATTERNS = (
+    re.compile(r"视频"),
+    re.compile(r"链接"),
+    re.compile(r"分享给你"),
+    re.compile(r"给你看"),
+    re.compile(r"刚刷到"),
+    re.compile(r"刚看到.{0,6}(搞笑|好玩|有意思)"),
+    re.compile(r"推荐你看"),
+)
+
+_CHAT_AUTHENTICITY_RULES = """\
+- 只聊聊天记录里真实出现的话题；对方没提视频/链接/分享，就不要主动提
+- 禁止说「给你看个视频」「刚刷到一个」等无法在微信里真正发送的内容
+- 禁止假装分享媒体；可聊日常、工作、天气、兴趣
+- 若对方问了具体问题，先直接回答，再延伸"""
+
+_FRIEND_SHARE_KEYWORDS = ("视频", "链接", "分享", "刷到", "推荐你看")
+
+
+def _friend_mentioned_share_topic(history: list[dict]) -> bool:
+    for item in history:
+        if item.get("role") != "friend":
+            continue
+        text = str(item.get("text", ""))
+        if any(k in text for k in _FRIEND_SHARE_KEYWORDS):
+            return True
+    return False
+
+
+def _looks_like_fake_share(reply: str) -> bool:
+    return any(p.search(reply) for p in _SHARE_VIDEO_PATTERNS)
+
 
 class LLMClient:
     """
@@ -117,6 +150,122 @@ class LLMClient:
         prompt = self._build_post_prompt(persona, topic)
         text = self._call_api(prompt, temperature=0.85, max_tokens=200)
         return self._ensure_variety(text, persona)
+
+    def generate_post_from_photos(
+        self,
+        persona: dict,
+        photo_descriptions: list[str],
+        topic: str = "日常",
+    ) -> str:
+        """
+        根据选中照片的画面描述生成朋友圈配文。
+
+        Args:
+            persona: 人格档案
+            photo_descriptions: Vision 输出的各张照片描述
+            topic: 备用主题
+
+        Returns:
+            与图片相关的朋友圈文案
+        """
+        desc_lines = "\n".join(
+            f"- 照片{i + 1}：{d.strip()}"
+            for i, d in enumerate(photo_descriptions)
+            if d and d.strip()
+        )
+        if not desc_lines:
+            return self.generate_post_text(persona, topic=topic)
+
+        prompt = f"""你是一个真实微信用户，以下是你的个人画像：
+- 年龄：{persona.get('age', '25-35')}岁
+- 城市：{persona.get('city', '北京')}
+- 兴趣爱好：{', '.join(persona.get('hobbies', ['美食', '旅行', '阅读']))}
+- 发圈风格：{persona.get('post_style', '随性简短')}
+
+你刚从手机相册里挑了几张照片准备发朋友圈，照片内容如下：
+{desc_lines}
+
+请根据这些照片写一条朋友圈文案（30-100字）。
+
+要求：
+- 文案必须和照片内容相关，不要写与画面无关的话
+- 像普通人随手发的，口语化、自然
+- 不要用 emoji 堆砌（最多2个）
+- 不要提敏感话题
+- 多张照片时可以概括整体氛围，不必逐张描述
+"""
+        text = self._call_api(prompt, temperature=0.85, max_tokens=200)
+        return self._ensure_variety(text, persona)
+
+    def classify_moment_thumbnail(self, jpeg_bytes: bytes) -> dict:
+        """
+        判断相册缩略图是否适合作为朋友圈配图。
+
+        Returns:
+            {suitable, category, description, reject_reason}
+        """
+        fallback = {
+            "suitable": True,
+            "category": "日常",
+            "description": "",
+            "reject_reason": "",
+        }
+        if not jpeg_bytes:
+            return {**fallback, "suitable": False, "reject_reason": "空图"}
+
+        if not self.vision_available:
+            return fallback
+
+        client = self._vision_client()
+        if not client:
+            return fallback
+
+        b64 = base64.b64encode(jpeg_bytes).decode("ascii")
+        prompt = """判断这张手机相册缩略图是否适合发微信朋友圈。
+
+不适合（suitable=false）：
+- 聊天/朋友圈/网页截图
+- 二维码、条形码、付款码
+- 证件、银行卡、发票
+- 黑屏、白屏、严重模糊
+- 系统界面、弹窗、验证码、广告
+
+适合（suitable=true）：
+- 风景、美食、宠物、自拍、日常、旅行、活动
+
+只输出 JSON，不要 markdown：
+{"suitable": true, "category": "风景|美食|宠物|自拍|日常|旅行|其他", "description": "10-30字画面描述", "reject_reason": ""}"""
+
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
+                    },
+                    {"type": "text", "text": prompt},
+                ],
+            }
+        ]
+        raw = self._call_api_vision(
+            messages,
+            model=self._vision_model(),
+            temperature=0.1,
+            max_tokens=180,
+            client=client,
+        )
+        parsed = self._parse_json_object(raw)
+        if not parsed:
+            logger.warning("Vision 缩略图分类 JSON 解析失败，保守接受")
+            return fallback
+
+        return {
+            "suitable": bool(parsed.get("suitable", True)),
+            "category": str(parsed.get("category") or "日常"),
+            "description": str(parsed.get("description") or "").strip(),
+            "reject_reason": str(parsed.get("reject_reason") or "").strip(),
+        }
 
     # ================================================================
     # 聊天内容
@@ -341,6 +490,7 @@ class LLMClient:
 - 10-50 字，口语化，像随手打的
 - 少用或不用 emoji，不要句号结尾
 - 只输出消息正文，不要引号、序号或解释
+{_CHAT_AUTHENTICITY_RULES}
 """
         messages: list[dict] = [{"role": "system", "content": system}]
         # 深聊续聊只需要最近一小段上下文，过长历史会显著增加延迟/超时概率
@@ -355,24 +505,46 @@ class LLMClient:
             messages.append(
                 {
                     "role": "user",
-                    "content": "（对话刚开始，请自然开场，像真人发微信）",
+                    "content": (
+                        "（对话刚开始，请用问候或问近况自然开场，"
+                        "禁止以分享视频/链接/媒体开场）"
+                    ),
                 }
             )
         elif history and history[-1].get("role") == "self":
             messages.append(
                 {
                     "role": "user",
-                    "content": "（你刚发过消息，对方还没回或回复较慢，可简短追问或自然换话题）",
+                    "content": (
+                        "（你刚发过消息，对方还没回或回复较慢，"
+                        "可简短追问或聊日常，禁止换到分享/视频/链接话题）"
+                    ),
                 }
             )
         else:
             messages.append(
-                {"role": "user", "content": "（请回复对方上一条消息）"}
+                {
+                    "role": "user",
+                    "content": "（请紧扣对方上一条消息回复，不要跑题）",
+                }
             )
 
         text = self._call_api_messages(messages, temperature=0.88, max_tokens=120)
         reply = (text or "").strip().strip('"\'「」')
-        if reply:
+        if reply and _looks_like_fake_share(reply) and not _friend_mentioned_share_topic(
+            history
+        ):
+            retry_messages = list(messages) + [
+                {
+                    "role": "user",
+                    "content": "（上一条不合适，重写：不要提视频/链接/分享，只聊日常）",
+                }
+            ]
+            text = self._call_api_messages(retry_messages, temperature=0.7, max_tokens=120)
+            reply = (text or "").strip().strip('"\'「」')
+        if reply and not (
+            _looks_like_fake_share(reply) and not _friend_mentioned_share_topic(history)
+        ):
             return reply
 
         # LLM 请求偶发超时/异常：给一个短兜底，保证“打开会话→OCR→发送”链路可验证
@@ -504,6 +676,94 @@ class LLMClient:
         )
         return self._parse_chat_messages_json(raw)
 
+    def detect_voice_bubbles_from_image(
+        self,
+        image_jpeg: bytes,
+    ) -> list[dict]:
+        """
+        多模态识图：检测聊天截图中的语音气泡位置。
+
+        Returns:
+            [{"role": "self"|"friend", "y_percent": 0.0~1.0, "duration": int|None}, ...]
+        """
+        client = self._vision_client()
+        if not client or not image_jpeg:
+            return []
+
+        b64 = base64.b64encode(image_jpeg).decode("ascii")
+        prompt = """这是一张微信 1v1 聊天页截图（已裁剪掉输入栏）。
+请找出所有**语音消息气泡**（左侧或右侧带波形图标和秒数，如 3''、5''），不是纯文字气泡。
+
+规则：
+1. 左侧白色/绿色气泡 → role 必须为 "friend"（对方语音，重点找！）
+2. 右侧绿色气泡 → role 为 "self"（自己语音）
+3. 忽略居中灰色时间戳（如 晚上6:15、下午5:52）
+4. y_percent 为气泡垂直中心在图片高度上的比例（0=顶部，1=底部）
+5. 只输出 JSON 数组，无语音则 []，例如：
+[{"role":"friend","y_percent":0.55,"duration":4},{"role":"self","y_percent":0.68,"duration":3}]
+"""
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
+                    },
+                    {"type": "text", "text": prompt},
+                ],
+            }
+        ]
+        model = self._vision_model()
+        raw = self._call_api_vision(
+            messages,
+            model=model,
+            temperature=0.1,
+            max_tokens=400,
+            client=client,
+        )
+        return self._parse_voice_bubbles_json(raw)
+
+    @staticmethod
+    def _parse_voice_bubbles_json(raw: str) -> list[dict]:
+        if not raw:
+            return []
+        text = raw.strip()
+        try:
+            data = json.loads(text)
+        except Exception:
+            m = re.search(r"\[[\s\S]*\]", text)
+            if not m:
+                return []
+            try:
+                data = json.loads(m.group(0))
+            except Exception:
+                return []
+        if not isinstance(data, list):
+            return []
+        out: list[dict] = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            role = item.get("role", "friend")
+            if role not in ("self", "friend"):
+                role = "friend"
+            try:
+                y_pct = float(item.get("y_percent", 0))
+            except (TypeError, ValueError):
+                y_pct = 0.0
+            y_pct = max(0.0, min(1.0, y_pct))
+            duration = item.get("duration")
+            if duration is not None:
+                try:
+                    duration = int(duration)
+                except (TypeError, ValueError):
+                    duration = None
+            out.append(
+                {"role": role, "y_percent": y_pct, "duration": duration}
+            )
+        return out
+
     @staticmethod
     def _parse_chat_messages_json(raw: str) -> list[dict]:
         if not raw:
@@ -553,10 +813,11 @@ class LLMClient:
 - 风格：{persona.get('comment_style', '自然随意')}
 
 请生成 {rounds} 条连续发送的消息，像真人断续聊天（不是一口气长文）。
-只输出 JSON 数组，例如：["早啊", "今天好忙", "晚上有空吗"]
+只输出 JSON 数组，例如：["在吗", "最近忙啥", "周末有啥安排"]
 要求：每条 5-40 字，口语化，不用句号结尾。
+{_CHAT_AUTHENTICITY_RULES}
 """
-        raw = self._call_api(prompt, temperature=0.9, max_tokens=400)
+        raw = self._call_api(prompt, temperature=0.82, max_tokens=400)
         if not raw:
             return []
         import json
@@ -631,6 +892,25 @@ class LLMClient:
     # ================================================================
     # 内部方法
     # ================================================================
+
+    def _parse_json_object(self, raw: str) -> dict:
+        """从 LLM 输出中提取 JSON 对象。"""
+        text = (raw or "").strip()
+        if not text:
+            return {}
+        try:
+            data = json.loads(text)
+            return data if isinstance(data, dict) else {}
+        except json.JSONDecodeError:
+            pass
+        m = re.search(r"\{[\s\S]*\}", text)
+        if not m:
+            return {}
+        try:
+            data = json.loads(m.group(0))
+            return data if isinstance(data, dict) else {}
+        except json.JSONDecodeError:
+            return {}
 
     def _build_post_prompt(self, persona: dict, topic: str) -> str:
         """构建朋友圈文案 prompt"""

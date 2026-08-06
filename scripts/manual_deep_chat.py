@@ -64,7 +64,7 @@ def run_ai_session(
     persona: dict,
     account_id: str,
     duration_seconds: int,
-    scroll_up: int = 1,
+    scroll_up: int = 2,
 ) -> bool:
     """
     单次 AI 深聊：读聊天记录 → 生成 → 发送，直到达到 duration_seconds。
@@ -92,11 +92,28 @@ def run_ai_session(
         if remaining < min_gap:
             break
 
-        ocr_history = reader.read_messages(
+        ocr_history = reader.read_messages_with_voice(
             contact_name=contact,
             scroll_up=scroll_up,
         )
         history = merge_sent_with_ocr(ocr_history, sent_log)
+
+        recent = history[-6:]
+        friend_msgs = [h for h in recent if h.get("role") == "friend"]
+        last = history[-1] if history else None
+        if (
+            last
+            and last.get("role") == "self"
+            and not friend_msgs
+            and sent_count > 0
+        ):
+            wait = min(
+                random.uniform(min_gap, max_gap),
+                max(5.0, remaining - 10),
+            )
+            print(f"[INFO] 等对方回复，跳过本轮（{wait:.0f}s 后再读）")
+            time.sleep(wait)
+            continue
 
         reply = llm.generate_chat_reply_from_history(
             persona=persona,
@@ -177,7 +194,7 @@ def main() -> int:
     parser.add_argument(
         "--scroll-up",
         type=int,
-        default=1,
+        default=2,
         help="每次读记录前上滑次数（加载更早消息）",
     )
     args = parser.parse_args()

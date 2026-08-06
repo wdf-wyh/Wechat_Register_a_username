@@ -90,26 +90,62 @@ class MomentPoster:
     # 公共接口
     # ================================================================
 
-    def post(self, text: str, photo_index: int = 0, photo_count: int = 1) -> bool:
+    def post(
+        self,
+        text: str = "",
+        photo_index: int = 0,
+        photo_count: int = 1,
+        photo_indices: list[int] | None = None,
+        persona: dict | None = None,
+        smart_select: bool = True,
+        topic: str = "日常",
+    ) -> bool:
         """
         发朋友圈。
 
         Args:
-            text:        朋友圈文案
-            photo_index: 起始照片序号，0=第一张
-            photo_count: 选几张照片
+            text:           朋友圈文案（空且 smart_select 时会按选中图片生成）
+            photo_index:    起始照片序号，0=第一张（非智能选图时使用）
+            photo_count:    选几张照片
+            photo_indices:  指定要选中的网格索引（优先于 photo_index）
+            persona:        人设，智能选图/配文时使用
+            smart_select:   是否 Vision 智能选图并生成图文配文
+            topic:          配文主题（智能选图失败时降级）
 
         Returns:
             是否成功
         """
-        logger.info(f"[{self.account_id}] 发朋友圈: text='{text[:20]}...', "
-                     f"photos={photo_count}")
+        logger.info(
+            f"[{self.account_id}] 发朋友圈: text='{(text or '')[:20]}...', "
+            f"photos={photo_count}, smart={smart_select}"
+        )
 
         try:
             self._navigate_to_moments()
             self._click_camera()
             self._click_album_option()
-            self._select_photos(photo_index, photo_count)
+
+            if photo_indices is None and smart_select and persona:
+                from content.moment_photo_picker import MomentPhotoPicker
+
+                picker = MomentPhotoPicker(self.d, account_id=self.account_id)
+                picked_indices, generated_text, _ = picker.scan_and_pick(
+                    persona,
+                    photo_count=photo_count,
+                    topic=topic,
+                )
+                if picked_indices:
+                    photo_indices = picked_indices
+                if not text and generated_text:
+                    text = generated_text
+
+            if not text:
+                text = "记录一下"
+
+            if photo_indices is not None:
+                self._select_photos_by_indices(photo_indices)
+            else:
+                self._select_photos(photo_index, photo_count)
             self._click_done()
             self._input_text(text)
             self._click_publish()
@@ -256,34 +292,22 @@ class MomentPoster:
 
     def _select_photos(self, photo_index: int = 0, count: int = 1):
         """OpenCV Canny边缘检测 → 选照片。"""
+        from content.moment_photo_picker import detect_album_thumbnails
+
         logger.debug(f"[{self.account_id}] 阶段3: 选{count}张照片(从#{photo_index+1}起)")
         d, w, h = self.d, self.w, self.h
 
-        time.sleep(3)
+        time.sleep(1.5)
 
         img = np.array(d.screenshot(format="pillow"))
         g = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-
-        album = g[180:int(h * 0.78), :]
-        edges = cv2.Canny(cv2.GaussianBlur(album, (5, 5), 0), 25, 80)
-        edges = cv2.dilate(edges, np.ones((4, 4), np.uint8), iterations=1)
-        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-        photos = []
-        for cnt in contours:
-            x, y, cw, ch = cv2.boundingRect(cnt)
-            ar = cw / ch if ch > 0 else 0
-            if 60 < cw < 500 and 60 < ch < 500 and 0.5 < ar < 2.0:
-                if 500 < cw * ch < 150000:
-                    photos.append({"cx": x + cw // 2, "cy": y + 180 + ch // 2})
-
-        photos.sort(key=lambda p: (p["cy"], p["cx"]))
+        photos = detect_album_thumbnails(g, h)
         logger.debug(f"[{self.account_id}] 检测到{len(photos)}个缩略图")
 
         selected = 0
         for i in range(photo_index, min(photo_index + count, len(photos))):
             p = photos[i]
-            d.click(p["cx"], p["cy"])
+            d.click(p.cx, p.cy)
             time.sleep(0.4)
             selected += 1
 
@@ -294,6 +318,26 @@ class MomentPoster:
             for i in range(selected, min(count, len(fallback))):
                 d.click(int(w * fallback[i][0]), int(h * fallback[i][1]))
                 time.sleep(0.4)
+
+    def _select_photos_by_indices(self, indices: list[int]):
+        """按网格索引点击已筛选的照片。"""
+        from content.moment_photo_picker import detect_album_thumbnails
+
+        logger.debug(f"[{self.account_id}] 阶段3: 按索引选图 {indices}")
+        d, h = self.d, self.h
+        time.sleep(0.5)
+
+        img = np.array(d.screenshot(format="pillow"))
+        g = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+        photos = detect_album_thumbnails(g, h)
+
+        for idx in indices:
+            if 0 <= idx < len(photos):
+                p = photos[idx]
+                d.click(p.cx, p.cy)
+                time.sleep(0.45)
+            else:
+                logger.warning(f"[{self.account_id}] 索引越界: {idx}")
 
     # ================================================================
     # 阶段4: OCR 识别"完成"
