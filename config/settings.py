@@ -93,12 +93,22 @@ class Settings:
     LOGNORMAL_SIGMA: float = 0.5           # 对数正态分布 σ 参数
 
     # ===== LLM =====
-    LLM_PROVIDER: str = "deepseek"         # deepseek / openai / local
+    LLM_PROVIDER: str = "deepseek"         # deepseek / openai / hunyuan / local
     LLM_API_KEY: str = ""
     LLM_BASE_URL: str = "https://api.deepseek.com"
     LLM_MODEL: str = "deepseek-chat"
     LLM_TEMPERATURE: float = 0.9
     LLM_MAX_TOKENS: int = 200
+    LLM_TIMEOUT: int = 60                  # 单次 API 超时（秒）
+    LLM_RETRY_TIMES: int = 2               # 超时后重试次数
+    LLM_VISION_MODEL: str = ""             # 多模态 endpoint（如 ep-xxx 或 doubao-1.5-vision-pro-32k-250115）
+    LLM_VISION_TIMEOUT: int = 90           # Vision 专用超时（秒，通常比文本更长）
+
+    # ===== 混元 / TokenHub（可选，优先用于 Vision 识图）=====
+    HUNYUAN_API_KEY: str = ""
+    HUNYUAN_BASE_URL: str = "https://tokenhub.tencentmaas.com/v1"
+    HUNYUAN_MODEL: str = "hy3"             # 文本模型
+    HUNYUAN_VISION_MODEL: str = "hy-vision-2.0-instruct"  # 图生文
 
     # ===== AI 上帝视角编排 =====
     USE_AI_GOD_PLANNER: bool = True        # True=LLM 编排当日剧本，失败回退规则模板
@@ -118,9 +128,26 @@ class Settings:
 
     def load_from_env(self):
         """从环境变量覆盖配置"""
+        self.LLM_PROVIDER = os.getenv("LLM_PROVIDER", self.LLM_PROVIDER)
         self.LLM_API_KEY = os.getenv("LLM_API_KEY", self.LLM_API_KEY)
         self.LLM_BASE_URL = os.getenv("LLM_BASE_URL", self.LLM_BASE_URL)
         self.LLM_MODEL = os.getenv("LLM_MODEL", self.LLM_MODEL)
+        _timeout = os.getenv("LLM_TIMEOUT")
+        if _timeout and _timeout.strip().isdigit():
+            self.LLM_TIMEOUT = int(_timeout)
+        _retry = os.getenv("LLM_RETRY_TIMES")
+        if _retry and _retry.strip().isdigit():
+            self.LLM_RETRY_TIMES = int(_retry)
+        self.LLM_VISION_MODEL = os.getenv("LLM_VISION_MODEL", self.LLM_VISION_MODEL)
+        _vtimeout = os.getenv("LLM_VISION_TIMEOUT")
+        if _vtimeout and _vtimeout.strip().isdigit():
+            self.LLM_VISION_TIMEOUT = int(_vtimeout)
+        self.HUNYUAN_API_KEY = os.getenv("HUNYUAN_API_KEY", self.HUNYUAN_API_KEY)
+        self.HUNYUAN_BASE_URL = os.getenv("HUNYUAN_BASE_URL", self.HUNYUAN_BASE_URL)
+        self.HUNYUAN_MODEL = os.getenv("HUNYUAN_MODEL", self.HUNYUAN_MODEL)
+        self.HUNYUAN_VISION_MODEL = os.getenv(
+            "HUNYUAN_VISION_MODEL", self.HUNYUAN_VISION_MODEL
+        )
         self.ALERT_DINGTALK_WEBHOOK = os.getenv("DINGTALK_WEBHOOK", self.ALERT_DINGTALK_WEBHOOK)
         flag = os.getenv("USE_AI_GOD_PLANNER")
         if flag is not None:

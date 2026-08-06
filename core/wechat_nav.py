@@ -258,24 +258,65 @@ def goto_tab(d, tab: str = "wechat"):
 
 
 def open_search(d) -> bool:
-    """在微信首页点击搜索图标（多候选，按机型）。"""
+    """在微信首页点击搜索图标（多候选，按机型）。
+
+    必须已在微信前台；像素差 alone 不够（桌面点顶栏也会 diff 很大），
+    点到「+」菜单时自动 back 并换下一候选。
+    """
     import cv2
     import numpy as np
+
+    if d.app_current().get("package") != WECHAT_PKG:
+        logger.warning("open_search: 微信不在前台，拒绝点击顶栏")
+        return False
 
     w, h = window_size(d)
     img_before = np.array(d.screenshot(format="pillow"))
     gray_before = cv2.cvtColor(img_before, cv2.COLOR_RGB2GRAY)
 
-    for rx, ry in search_icon_candidates_for(d):
+    # 避开最右侧「+」：rx>=0.94 几乎必中加号菜单
+    candidates = [
+        (rx, ry) for rx, ry in search_icon_candidates_for(d) if float(rx) < 0.94
+    ]
+    if not candidates:
+        candidates = list(search_icon_candidates_for(d))
+
+    plus_menu_markers = ("发起群聊", "添加朋友", "扫一扫", "收付款")
+
+    for rx, ry in candidates:
         cx, cy = int(w * rx), int(h * ry)
         d.click(cx, cy)
-        time.sleep(1.6)
+        time.sleep(1.2)
         if dismiss_app_chooser(d):
             time.sleep(0.5)
+        if d.app_current().get("package") != WECHAT_PKG:
+            logger.warning("open_search: 点击后离开微信，中止")
+            return False
+
         img_after = np.array(d.screenshot(format="pillow"))
         gray_after = cv2.cvtColor(img_after, cv2.COLOR_RGB2GRAY)
         diff = float(np.mean(cv2.absdiff(
             gray_after.astype(np.int16), gray_before.astype(np.int16))))
+
+        # 粗 OCR：是否误开 + 菜单
+        top = gray_after[0:int(h * 0.45), :]
+        try:
+            # 轻量：只看是否出现加号菜单文案（用像素区域即可，OCR 由调用方再验）
+            # 这里用 u2 文本兜底，微信无障碍常失败则跳过
+            blob = ""
+            for marker in plus_menu_markers:
+                if d(textContains=marker).exists(timeout=0.15):
+                    blob = marker
+                    break
+        except Exception:
+            blob = ""
+
+        if blob:
+            logger.debug(f"open_search 误触加号菜单 @({cx},{cy})，返回重试")
+            d.press("back")
+            time.sleep(0.5)
+            continue
+
         if diff > 8:
             logger.debug(f"搜索页已打开 ({cx},{cy}) diff={diff:.0f}")
             return True
@@ -291,15 +332,20 @@ def ocr_find_and_click(
     *,
     y_min_ratio: float = 0.08,
     y_max_ratio: float = 0.92,
+    x_min_ratio: float = 0.0,
+    x_max_ratio: float = 1.0,
     conf_min: float = 0.35,
     enhance: Optional[Callable] = None,
     exact: bool = False,
     click_row_center: bool = False,
+    click_x_bias: float = 0.0,
+    post_click_sleep: float = 1.2,
 ) -> bool:
     """
     OCR 全屏找关键词并点击文字中心。
     keywords 任一命中即可（子串或 exact）。
     click_row_center=True 时点该行中部（适合发现页列表项）。
+    click_x_bias: 相对文字框宽度的水平偏移（负=偏左，适合点「写评论」避开右侧配图）。
     """
     import cv2
     import numpy as np
@@ -313,8 +359,9 @@ def ocr_find_and_click(
     results = reader.readtext(bgr)
 
     y_min, y_max = int(h * y_min_ratio), int(h * y_max_ratio)
+    x_min, x_max = int(w * x_min_ratio), int(w * x_max_ratio)
     keys = list(keywords)
-    best = None  # (y, cx, cy)
+    best = None  # (priority, y, cx, cy)  priority: exact match first
 
     for bbox, text, conf in results:
         if conf < conf_min:
@@ -323,29 +370,37 @@ def ocr_find_and_click(
         if not t:
             continue
         cy = int((bbox[0][1] + bbox[2][1]) / 2)
+        cx = int((bbox[0][0] + bbox[2][0]) / 2)
         if cy < y_min or cy > y_max:
             continue
+        if cx < x_min or cx > x_max:
+            continue
         hit = False
+        is_exact = False
         for k in keys:
-            if exact:
-                if t == k:
-                    hit = True
-                    break
-            else:
-                if k in t or t in k:
-                    hit = True
-                    break
+            if t == k:
+                hit = True
+                is_exact = True
+                break
+            if not exact and (k in t or t in k):
+                hit = True
+                break
         if not hit:
             continue
-        cx = int((bbox[0][0] + bbox[2][0]) / 2)
-        if best is None or cy < best[0]:
-            best = (cy, cx, cy)
+        # 偏左点击：写评论输入条文字中心右侧常有配图/表情
+        box_w = max(8, int(bbox[2][0] - bbox[0][0]))
+        adj_cx = int(cx + click_x_bias * box_w)
+        adj_cx = max(0, min(w - 1, adj_cx))
+        priority = 0 if is_exact else 1
+        cand = (priority, cy, adj_cx, cy)
+        if best is None or cand < best:
+            best = cand
 
     if best is None:
         return False
-    cx, cy = best[1], best[2]
+    cx, cy = best[2], best[3]
     if click_row_center:
         cx = int(w * 0.45)
     d.click(cx, cy)
-    time.sleep(2.0)
+    time.sleep(max(0.2, float(post_click_sleep)))
     return True

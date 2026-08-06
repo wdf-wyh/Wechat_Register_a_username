@@ -647,8 +647,8 @@ class ChannelsBrowser:
         return True
 
     def _keyboard_with_send_visible(self) -> bool:
-        """系统键盘已弹出：能 OCR 到「发送」。"""
-        return "发送" in self._input_bar_blob(y_min=0.45)
+        """系统键盘已弹出：输入工具栏区域能 OCR 到「发送」。"""
+        return "发送" in self._input_bar_blob(y_min=0.48, y_max=0.64)
 
     def _wait_send_button(self, timeout: float = 4.0) -> bool:
         """等待键盘弹出后出现「发送」（空内容时可能灰色，但仍可见）。"""
@@ -663,37 +663,39 @@ class ChannelsBrowser:
         """
         在系统键盘已弹出时写入评论。
 
-        不要 set_input_ime(True)：ADBKeyboard 会收起系统键盘，
-        视频号的「发送」按钮会一起消失。
+        仅优先剪贴板粘贴：set_text / send_keys 会收起系统键盘，
+        视频号工具栏「发送」会一起消失。
         """
-        try:
-            focused = self.d(focused=True)
-            if focused.exists(timeout=0.6):
-                focused.set_text(text)
-                time.sleep(0.45)
-                if self._text_in_input(text):
-                    return True
-        except Exception as e:
-            logger.debug(f"[{self.account_id}] set_text 失败: {e}")
+        t = (text or "").strip()
+        if not t:
+            return False
+
+        self._focus_comment_input()
+        time.sleep(0.35)
 
         try:
-            self.d.set_clipboard(text)
-            time.sleep(0.15)
+            self.d.set_clipboard(t)
+            time.sleep(0.12)
             self.d.shell("input keyevent 279")  # PASTE
-            time.sleep(0.45)
-            if self._text_in_input(text):
-                return True
+            time.sleep(0.55)
+            if self._text_in_input(t):
+                if not self._keyboard_with_send_visible():
+                    self._focus_comment_input()
+                    self._wait_send_button(2.0)
+                return self._text_in_input(t)
         except Exception as e:
             logger.debug(f"[{self.account_id}] paste 失败: {e}")
 
+        # 兜底：可能已切到底栏输入态（无系统键盘）
         try:
-            self.d.send_keys(text)
-            time.sleep(0.45)
-            if self._text_in_input(text):
-                return True
+            focused = self.d(focused=True)
+            if focused.exists(timeout=0.5):
+                focused.set_text(t)
+                time.sleep(0.4)
+                return self._text_in_input(t)
         except Exception as e:
-            logger.debug(f"[{self.account_id}] send_keys 失败: {e}")
-        return self._text_in_input(text)
+            logger.debug(f"[{self.account_id}] set_text 失败: {e}")
+        return self._text_in_input(t)
 
     def _text_in_input(self, text: str) -> bool:
         """输入区是否已出现待发文案。"""
@@ -705,13 +707,15 @@ class ChannelsBrowser:
             return True
         return len(t) >= 2 and t[:2] in blob
 
-    def _input_bar_blob(self, y_min: float = 0.50) -> str:
-        """OCR 下半屏文字（含键盘/输入条，便于找「发送」）。"""
+    def _input_bar_blob(self, y_min: float = 0.50, y_max: float = 1.0) -> str:
+        """OCR 指定纵向区域文字（含键盘/输入条，便于找「发送」）。"""
         try:
             img = np.array(self.d.screenshot(format="pillow"))
             gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
             h, w = gray.shape[:2]
-            region = self._enhance(gray[int(h * y_min):h, 0:w])
+            y0 = max(0, min(int(h * y_min), h - 1))
+            y1 = max(y0 + 1, min(int(h * y_max), h))
+            region = self._enhance(gray[y0:y1, 0:w])
             results = self._get_ocr().readtext(cv2.cvtColor(region, cv2.COLOR_GRAY2BGR))
             return " ".join(str(t) for _, t, c in results if c >= 0.3)
         except Exception:
@@ -723,8 +727,8 @@ class ChannelsBrowser:
             return self._input_bar_blob(y_min=0.48)
         return self._input_bar_blob(y_min=0.82)
 
-    def _find_channels_send_green(self):
-        """键盘上方右侧微信绿「发送」（有内容后常由灰变绿）。"""
+    def _find_channels_send_green(self, y_min: float = 0.48, y_max: float = 0.64):
+        """输入工具栏右侧微信绿「发送」（有内容后常由灰变绿）。"""
         try:
             shot = self.d.screenshot(format="opencv")
             if shot is None:
@@ -732,7 +736,7 @@ class ChannelsBrowser:
             h, w = shot.shape[:2]
             hsv = cv2.cvtColor(shot, cv2.COLOR_BGR2HSV)
             mask = cv2.inRange(hsv, np.array([35, 60, 60]), np.array([95, 255, 255]))
-            y0, y1 = int(h * 0.45), int(h * 0.78)
+            y0, y1 = int(h * y_min), int(h * y_max)
             x0 = int(w * 0.70)
             mask[:y0, :] = 0
             mask[y1:, :] = 0
@@ -779,18 +783,35 @@ class ChannelsBrowser:
         return False
 
     def _send_comment_text(self) -> bool:
-        """键盘仍在时点击「发送」（表情行右侧）。"""
-        pt = self._find_channels_send_green()
-        if pt:
-            logger.info(f"[{self.account_id}] 绿钮发送 @({pt[0]:.3f},{pt[1]:.3f})")
-            click_ratio(self.d, float(pt[0]), float(pt[1]))
-            return True
+        """点击「发送」：键盘弹起时点工具栏，收起时点底栏。"""
+        keyboard_up = self._keyboard_with_send_visible()
 
-        if self._click_send_by_uiautomator():
-            logger.info(f"[{self.account_id}] u2 点发送")
-            return True
+        if keyboard_up:
+            pt = self._find_channels_send_green(0.48, 0.64)
+            if pt:
+                logger.info(f"[{self.account_id}] 绿钮发送 @({pt[0]:.3f},{pt[1]:.3f})")
+                click_ratio(self.d, float(pt[0]), float(pt[1]))
+                return True
 
-        for y0, y1 in ((0.48, 0.78), (0.42, 0.72), (0.50, 0.85)):
+            if self._click_send_by_uiautomator():
+                logger.info(f"[{self.account_id}] u2 点发送")
+                return True
+
+            for y0, y1 in ((0.48, 0.64), (0.45, 0.68)):
+                if ocr_find_and_click(
+                    self.d,
+                    self._get_ocr(),
+                    ["发送"],
+                    y_min_ratio=y0,
+                    y_max_ratio=y1,
+                    conf_min=0.28,
+                    enhance=self._enhance,
+                ):
+                    logger.info(f"[{self.account_id}] OCR 点发送 y={y0}-{y1}")
+                    return True
+
+        # 键盘已收起：底栏输入态
+        for y0, y1 in ((0.82, 0.97), (0.78, 0.94)):
             if ocr_find_and_click(
                 self.d,
                 self._get_ocr(),
@@ -800,29 +821,51 @@ class ChannelsBrowser:
                 conf_min=0.28,
                 enhance=self._enhance,
             ):
-                logger.info(f"[{self.account_id}] OCR 点发送 y={y0}-{y1}")
+                logger.info(f"[{self.account_id}] OCR 点底栏发送 y={y0}-{y1}")
                 return True
+
+        pt = self._find_channels_send_green(0.82, 0.96)
+        if pt:
+            logger.info(f"[{self.account_id}] 底栏绿钮发送 @({pt[0]:.3f},{pt[1]:.3f})")
+            click_ratio(self.d, float(pt[0]), float(pt[1]))
+            return True
 
         try:
             from config.device_profiles import get_extra
-            pts = list(get_extra(self.d, "channels_comment_send_candidates") or [])
-            pt2 = get_extra(self.d, "channels_comment_send")
+            key = (
+                "channels_comment_send_candidates"
+                if keyboard_up
+                else "channels_comment_send_collapsed_candidates"
+            )
+            pts = list(get_extra(self.d, key) or [])
+            pt2 = get_extra(
+                self.d,
+                "channels_comment_send" if keyboard_up else "channels_comment_send_collapsed",
+            )
             if pt2:
-                pts.append(pt2)
-            for cand in pts:
+                pts.insert(0, pt2)
+            fallback = get_extra(self.d, "channels_comment_send_candidates") or []
+            for cand in list(pts) + list(fallback):
                 if not cand:
                     continue
                 click_ratio(self.d, float(cand[0]), float(cand[1]))
                 time.sleep(0.45)
                 if self._comment_published_quick():
+                    logger.info(f"[{self.account_id}] 坐标发送成功 {cand}")
                     return True
         except Exception:
             pass
 
-        for rx, ry in ((0.90, 0.62), (0.92, 0.60), (0.88, 0.64), (0.90, 0.58)):
+        ratios = (
+            ((0.90, 0.55), (0.92, 0.54), (0.88, 0.56))
+            if keyboard_up
+            else ((0.92, 0.90), (0.90, 0.88), (0.94, 0.91))
+        )
+        for rx, ry in ratios:
             click_ratio(self.d, rx, ry)
             time.sleep(0.4)
             if self._comment_published_quick():
+                logger.info(f"[{self.account_id}] 比例发送成功 ({rx},{ry})")
                 return True
         return False
 

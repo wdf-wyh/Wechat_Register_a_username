@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-公众号评论定向冒烟测试 — 只验证「阅读公众号文章 -> 写评论」链路。
+公众号评论定向冒烟测试 — 只验证「阅读公众号文章 -> 写评论 -> 点绿色发送」链路。
 
 用法:
   python scripts/public_account_comment_smoke.py
@@ -77,7 +77,7 @@ def main():
     d = dm.get_device(serial)
     wc = WeChatControl(d, Humanizer(), account_id=account_id)
 
-    # 保证回到首页后再进公众号链路
+    # 快速回到微信 Tab（不再连按 back，避免退出到桌面误点系统搜索）
     wc.ensure_wechat_home()
 
     browser = PublicAccountBrowser(d, account_id=account_id, persona=persona)

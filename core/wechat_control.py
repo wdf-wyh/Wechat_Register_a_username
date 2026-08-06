@@ -94,14 +94,25 @@ class WeChatControl:
         return success
 
     def ensure_wechat_home(self) -> bool:
-        """确保回到微信首页（聊天列表）"""
-        # 尝试按返回直到回到首页，或直接点击"微信"Tab
-        for _ in range(3):
-            if self.locator.exists("tab_wechat", timeout=1.0):
-                return self.go_to_tab("微信")
-            self.d.press("back")
-            self.h.random_sleep(0.5, 1.0)
-        return self.go_to_tab("微信")
+        """确保回到微信首页（聊天列表）。
+
+        微信屏蔽无障碍树时 ``tab_wechat`` 文本定位几乎总是失败，
+        不能因此连按 back（会退出微信落到桌面，再点顶栏会误触系统搜索框）。
+        """
+        from core.wechat_nav import WECHAT_PKG, goto_tab, start_wechat
+
+        try:
+            if self.d.app_current().get("package") != WECHAT_PKG:
+                start_wechat(self.d, wait=3.0, cold=False)
+        except Exception:
+            start_wechat(self.d, wait=3.0, cold=False)
+
+        # 优先机型坐标切 Tab，避免无障碍超时拖慢首页
+        try:
+            goto_tab(self.d, "wechat")
+            return True
+        except Exception:
+            return self.go_to_tab("微信")
 
     # ================================================================
     # 朋友圈操作

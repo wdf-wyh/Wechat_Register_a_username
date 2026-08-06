@@ -50,10 +50,10 @@ PROFILE = DeviceProfile(
         "moments_entry": (0.20, 0.127),
         "channels_entry": (0.20, 0.199),
         "search_icon_candidates": [
+            # 搜索在 + 左侧；勿用 >=0.94（会点到加号）
             (0.90, 0.054),
             (0.88, 0.054),
-            (0.831, 0.054),
-            (0.78, 0.054),
+            (0.86, 0.054),
         ],
         "favorites_entry": (0.50, 0.35),
     },
@@ -107,15 +107,29 @@ PROFILE = DeviceProfile(
         "moments_dots_x_ratios": (0.93, 0.91, 0.89, 0.95, 0.87),
         # 视频号底栏最右侧评论气泡（数字上方图标）
         "channels_comment_icon": (0.93, 0.88),
-        "channels_comment_input": (0.42, 0.72),
-        "channels_comment_send": (0.90, 0.62),
-        # 键盘弹起后「发送」在表情行右侧
+        # 半屏评论 + 系统键盘：输入条约在 y=0.52
+        "channels_comment_input": (0.42, 0.52),
+        "channels_comment_send": (0.90, 0.55),
         "channels_comment_send_candidates": [
-            (0.90, 0.62),
-            (0.92, 0.60),
-            (0.88, 0.64),
+            (0.90, 0.55),
+            (0.92, 0.54),
+            (0.88, 0.56),
             (0.90, 0.58),
-            (0.93, 0.56),
+        ],
+        # 键盘收起后底栏输入态
+        "channels_comment_send_collapsed": (0.92, 0.90),
+        "channels_comment_send_collapsed_candidates": [
+            (0.92, 0.90),
+            (0.90, 0.88),
+            (0.94, 0.91),
+        ],
+        # 公众号文章留言区「发送」（ADB 键盘收起时底栏绿钮）
+        "pa_comment_send": (0.92, 0.88),
+        "pa_comment_send_candidates": [
+            (0.92, 0.88),
+            (0.90, 0.86),
+            (0.94, 0.89),
+            (0.88, 0.90),
         ],
     },
 )
