@@ -25,11 +25,17 @@ from content.personas import get_persona, random_persona
 from core.device import DeviceManager
 from core.message_sender import MessageSender
 from core.social_actions import SocialActions
-from scripts.chat_history_reader import ChatHistoryReader, merge_sent_with_ocr
+from scripts.chat_history_reader import (
+    ChatHistoryReader,
+    merge_sent_with_ocr,
+    sanitize_chat_history_for_llm,
+)
 from storage.db import Database
 from utils.logger import get_logger
 
 logger = get_logger("manual_deep_chat")
+
+LLM_UNAVAILABLE_REPLY = "请稍等"
 
 
 def build_static_messages(rounds: int = 7) -> list[str]:
@@ -58,6 +64,66 @@ def open_chat(sender: MessageSender, contact: str) -> bool:
         return False
 
 
+def send_contextual_reply(
+    d,
+    contact: str,
+    persona: dict,
+    account_id: str,
+    text: str = "",
+    scroll_up: int = 1,
+    max_voice_transcribe: int = 4,
+) -> bool:
+    """
+    读聊天历史（含语音转文字）后生成并发送一条回复。
+    text 非空时直接发送，不读历史。
+    LLM 不可用或生成失败时发送「请稍等」。
+    """
+    sender = MessageSender(d, account_id=account_id)
+    if text:
+        return sender.send(contact=contact, message=text)
+
+    llm = LLMClient()
+    if not llm.available:
+        logger.warning(f"[{account_id}] LLM 未配置，发送: {LLM_UNAVAILABLE_REPLY}")
+        return sender.send(contact=contact, message=LLM_UNAVAILABLE_REPLY)
+
+    reader = ChatHistoryReader(d, account_id=account_id)
+    if open_chat(sender, contact):
+        try:
+            history = reader.read_messages_with_voice(
+                contact_name=contact,
+                scroll_up=scroll_up,
+                max_voice_transcribe=max_voice_transcribe,
+            )
+            history = sanitize_chat_history_for_llm(history)
+            reply = llm.generate_chat_reply_from_history(
+                persona=persona,
+                contact=contact,
+                history=history,
+            )
+            if reply:
+                try:
+                    sender._input_message(reply)
+                    sender._click_send()
+                    logger.info(
+                        f"[{account_id}] 上下文回复已发送: {reply[:40]}"
+                    )
+                    return True
+                except Exception as e:
+                    logger.warning(
+                        f"[{account_id}] 发送失败，重试打开会话: {e}"
+                    )
+                    if open_chat(sender, contact):
+                        sender._input_message(reply)
+                        sender._click_send()
+                        return True
+        except Exception as e:
+            logger.warning(f"[{account_id}] 读历史/生成回复失败: {e}")
+
+    logger.warning(f"[{account_id}] 无法生成 AI 回复，跳过发送")
+    return False
+
+
 def run_ai_session(
     d,
     contact: str,
@@ -71,8 +137,9 @@ def run_ai_session(
     """
     llm = LLMClient()
     if not llm.available:
-        print("[FAIL] LLM 未配置，请在 .env 设置 LLM_API_KEY")
-        return False
+        logger.warning(f"[{account_id}] LLM 未配置，发送: {LLM_UNAVAILABLE_REPLY}")
+        sender = MessageSender(d, account_id=account_id)
+        return sender.send(contact=contact, message=LLM_UNAVAILABLE_REPLY)
 
     sender = MessageSender(d, account_id=account_id)
     reader = ChatHistoryReader(d, account_id=account_id)
@@ -95,8 +162,11 @@ def run_ai_session(
         ocr_history = reader.read_messages_with_voice(
             contact_name=contact,
             scroll_up=scroll_up,
+            max_voice_transcribe=4,
         )
-        history = merge_sent_with_ocr(ocr_history, sent_log)
+        history = sanitize_chat_history_for_llm(
+            merge_sent_with_ocr(ocr_history, sent_log)
+        )
 
         recent = history[-6:]
         friend_msgs = [h for h in recent if h.get("role") == "friend"]

@@ -102,6 +102,9 @@ PROFILE = DeviceProfile(
         "msg_search_icon": (0.90, 0.054),
         "msg_input": (0.50, 0.93),
         "msg_send": (0.90, 0.93),
+        # 语音气泡长按偏移（时长 OCR 在气泡边缘，需移到中心）
+        "voice_press_friend_x_offset": 0.08,
+        "voice_press_self_x_offset": 0.10,
         "moments_camera": (0.90, 0.054),
         "moments_publish": (0.90, 0.055),
         "moments_dots_x_ratios": (0.93, 0.91, 0.89, 0.95, 0.87),

@@ -24,8 +24,12 @@ from content.llm_client import LLMClient
 from content.personas import random_persona
 from core.device import DeviceManager
 from core.message_sender import MessageSender
-from scripts.chat_history_reader import ChatHistoryReader, merge_sent_with_ocr
-from scripts.manual_deep_chat import open_chat
+from scripts.chat_history_reader import (
+    ChatHistoryReader,
+    merge_sent_with_ocr,
+    sanitize_chat_history_for_llm,
+)
+from scripts.manual_deep_chat import LLM_UNAVAILABLE_REPLY, open_chat
 from storage.db import Database
 from utils.logger import get_logger, setup_logger
 
@@ -99,7 +103,21 @@ def run_smoke(contact: str, serial: str | None = None) -> dict:
     if not opened:
         return _summary(results)
 
-    ocr_history = reader.read_messages_with_voice(contact_name=contact, scroll_up=1)
+    time.sleep(1.0)
+
+    ocr_history = reader.read_messages_with_voice(
+        contact_name=contact,
+        scroll_up=0,
+        max_voice_transcribe=4,
+    )
+    voice_items = [h for h in ocr_history if h.get("type") == "voice"]
+    friend_voice = [h for h in voice_items if h.get("role") == "friend"]
+    self_voice = [h for h in voice_items if h.get("role") == "self"]
+    logger.info(
+        f"[{account_id}] 语音: 共 {len(voice_items)} "
+        f"(友 {len(friend_voice)} / 我 {len(self_voice)})"
+    )
+    ocr_history = sanitize_chat_history_for_llm(ocr_history)
     record("ocr_read_history", True, f"读到 {len(ocr_history)} 条可见消息")
 
     reply = llm.generate_chat_reply_from_history(
@@ -107,13 +125,15 @@ def run_smoke(contact: str, serial: str | None = None) -> dict:
         contact=contact,
         history=ocr_history,
     )
+    if not reply:
+        logger.warning(f"[{account_id}] LLM 未返回内容，跳过发送")
+        record("llm_generate_reply", False, "空")
+        return _summary(results)
     record(
         "llm_generate_reply",
-        bool(reply),
-        (reply[:36] + "...") if reply and len(reply) > 36 else (reply or "空"),
+        True,
+        (reply[:36] + "...") if len(reply) > 36 else reply,
     )
-    if not reply:
-        return _summary(results)
 
     try:
         sender._input_message(reply)
@@ -129,8 +149,14 @@ def run_smoke(contact: str, serial: str | None = None) -> dict:
 
     while time.time() < end_at and sent_count < MIN_SEND_COUNT:
         time.sleep(20)
-        ocr_history = reader.read_messages_with_voice(contact_name=contact, scroll_up=1)
-        history = merge_sent_with_ocr(ocr_history, sent_log)
+        ocr_history = reader.read_messages_with_voice(
+            contact_name=contact,
+            scroll_up=0,
+            max_voice_transcribe=4,
+        )
+        history = sanitize_chat_history_for_llm(
+            merge_sent_with_ocr(ocr_history, sent_log)
+        )
         recent = history[-6:]
         friend_msgs = [h for h in recent if h.get("role") == "friend"]
         last = history[-1] if history else None
@@ -143,6 +169,7 @@ def run_smoke(contact: str, serial: str | None = None) -> dict:
             history=history,
         )
         if not next_reply:
+            print("  [INFO] 无需回复或生成失败，跳过本轮")
             continue
         try:
             sender._input_message(next_reply)

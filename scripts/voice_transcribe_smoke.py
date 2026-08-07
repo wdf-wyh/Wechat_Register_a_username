@@ -24,7 +24,20 @@ if PROJECT_ROOT not in sys.path:
 from config.settings import settings
 from core.device import DeviceManager
 from core.message_sender import MessageSender
-from scripts.chat_history_reader import ChatHistoryReader, _VOICE_PLACEHOLDER
+from scripts.chat_history_reader import (
+    ChatHistoryReader,
+    _VOICE_PLACEHOLDER,
+    _VOICE_UNTRANSCRIBED_LLM,
+)
+
+
+def _voice_is_transcribed(text: str) -> bool:
+    t = str(text or "").strip()
+    if not t:
+        return False
+    if _VOICE_PLACEHOLDER in t or _VOICE_UNTRANSCRIBED_LLM in t:
+        return False
+    return True
 from scripts.manual_deep_chat import open_chat
 from storage.db import Database
 from utils.logger import get_logger, setup_logger
@@ -92,12 +105,16 @@ def run_smoke(contact: str, serial: str | None = None) -> dict:
 
     time.sleep(1.0)
 
+    crop_path = reader.save_ocr_debug_crop("smoke")
+    if crop_path:
+        print(f"  [INFO] OCR 裁剪截图: {crop_path}")
+
     text_only = reader.read_messages(contact_name=contact, scroll_up=0)
     record("ocr_text_read", True, f"文字消息 {len(text_only)} 条")
 
     voice_history = reader.read_messages_with_voice(
         contact_name=contact,
-        scroll_up=2,
+        scroll_up=0,
         max_voice_transcribe=4,
     )
     voice_items = [h for h in voice_history if h.get("type") == "voice"]
@@ -123,8 +140,7 @@ def run_smoke(contact: str, serial: str | None = None) -> dict:
     transcribed = [
         h
         for h in voice_items
-        if h.get("text")
-        and _VOICE_PLACEHOLDER not in str(h.get("text", ""))
+        if _voice_is_transcribed(h.get("text", ""))
     ]
     if voice_items and not friend_voice:
         print(
@@ -133,19 +149,19 @@ def run_smoke(contact: str, serial: str | None = None) -> dict:
         )
     if voice_items:
         friend_ok = all(
-            _VOICE_PLACEHOLDER not in str(h.get("text", ""))
+            _voice_is_transcribed(h.get("text", ""))
             for h in friend_voice
         ) if friend_voice else True
         self_ok = all(
-            _VOICE_PLACEHOLDER not in str(h.get("text", ""))
+            _voice_is_transcribed(h.get("text", ""))
             for h in self_voice
         ) if self_voice else True
         record(
             "voice_transcript",
             len(transcribed) > 0 and friend_ok and self_ok,
             f"成功转写 {len(transcribed)}/{len(voice_items)} 条"
-            f"（友 {len([h for h in friend_voice if _VOICE_PLACEHOLDER not in str(h.get('text',''))])}/{len(friend_voice)}"
-            f" 我 {len([h for h in self_voice if _VOICE_PLACEHOLDER not in str(h.get('text',''))])}/{len(self_voice)}）",
+            f"（友 {len([h for h in friend_voice if _voice_is_transcribed(h.get('text',''))])}/{len(friend_voice)}"
+            f" 我 {len([h for h in self_voice if _voice_is_transcribed(h.get('text',''))])}/{len(self_voice)}）",
         )
     else:
         record(

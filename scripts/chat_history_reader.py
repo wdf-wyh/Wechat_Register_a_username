@@ -20,11 +20,16 @@ from utils.logger import get_logger
 
 logger = get_logger("chat_history_reader")
 
-# 语音气泡时长：3''、12″、5秒 等
+# 语音气泡时长：2''、12″、5秒 等（秒数范围 1-60）
 _VOICE_DURATION_RE = re.compile(
-    r"^\d{1,3}(['″\"″秒]+)?$|^\d{1,3}\s*['″\"″]+$"
+    r"^(?:[1-9]|[1-5]\d|60)(['″\"″秒]+)?$"
+    r"|^(?:[1-9]|[1-5]\d|60)\s*['″\"″]+$"
+)
+_VOICE_DURATION_IN_TEXT_RE = re.compile(
+    r"(?:^|\D)([1-9]|[1-5]\d|60)\s*['″\"″秒]*"
 )
 _VOICE_PLACEHOLDER = "[语音消息]"
+_VOICE_UNTRANSCRIBED_LLM = "（发来语音，未转写，不知道内容）"
 _VOICE_MENU_KEYWORDS = ("转文字", "转文宇", "转成文字", "转为文字")
 _CHAT_TIMESTAMP_RE = re.compile(
     r"^(凌晨|早上|上午|中午|下午|晚上)?\d{1,2}[:：;.\uFF1a\uFF1b\uFF0e]\d{2}$"
@@ -34,8 +39,9 @@ _CHAT_TIMESTAMP_RE = re.compile(
 _UI_NOISE = frozenset(
     {
         "发送",
-        "按住",
-        "说话",
+        "按住 说话",
+        "松开发送",
+        "松开 发送",
         "表情",
         "更多",
         "微信",
@@ -59,8 +65,58 @@ _UI_NOISE = frozenset(
         "免打扰",
         "置顶",
         "查找聊天内容",
+        "请稍等",
+        "稍等",
     }
 )
+_UI_NOISE_PATTERNS = (
+    re.compile(r".*撤回了一条消息.*"),
+    re.compile(r".*重新编辑.*"),
+)
+_CHAT_HISTORY_SKIP_TEXTS = frozenset(
+    {
+        "请稍等",
+        "稍等",
+        "等等",
+    }
+)
+
+
+def _normalize_voice_text_for_llm(text: str) -> str:
+    t = text.strip()
+    if not t:
+        return t
+    if t in ("[语音]", "[语音消息]", "语音") or t.startswith("[语音"):
+        return _VOICE_UNTRANSCRIBED_LLM
+    if _VOICE_PLACEHOLDER in t:
+        m = re.search(r"(\d+)\s*秒", t)
+        if m:
+            return f"{_VOICE_UNTRANSCRIBED_LLM} {m.group(1)}秒"
+        return _VOICE_UNTRANSCRIBED_LLM
+    return t
+
+
+def sanitize_chat_history_for_llm(history: list[dict]) -> list[dict]:
+    """过滤不应进入 LLM 上下文的 OCR 噪音与脚本占位回复。"""
+    out: list[dict] = []
+    for item in history:
+        text = _normalize_voice_text_for_llm(str(item.get("text", "")))
+        if not text:
+            continue
+        if text in _CHAT_HISTORY_SKIP_TEXTS:
+            continue
+        if any(p.search(text) for p in _UI_NOISE_PATTERNS):
+            continue
+        if re.fullmatch(r"\d{1,4}", text):
+            continue
+        out.append(
+            {
+                "role": item.get("role", "friend"),
+                "text": text,
+                **({"type": item["type"]} if item.get("type") else {}),
+            }
+        )
+    return out
 
 
 class ChatHistoryReader:
@@ -97,10 +153,17 @@ class ChatHistoryReader:
             )
             time.sleep(0.5)
 
+    def _chat_y_top(self) -> int:
+        return int(self.h * 0.10)
+
+    def _chat_y_bottom(self) -> int:
+        """聊天消息区下边界（输入栏在 ~0.93，留一点余量）。"""
+        return int(self.h * 0.905)
+
     def capture_chat_region(self) -> np.ndarray:
         """截取聊天消息区域（BGR，与 OCR 使用同一裁剪）。"""
-        y_top = int(self.h * 0.10)
-        y_bottom = int(self.h * 0.84)
+        y_top = self._chat_y_top()
+        y_bottom = self._chat_y_bottom()
 
         img = np.array(self.d.screenshot(format="pillow"))
         gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
@@ -110,6 +173,25 @@ class ChatHistoryReader:
         crop = enhanced[y_top:y_bottom, :]
         return cv2.cvtColor(crop, cv2.COLOR_GRAY2BGR)
 
+    def save_ocr_debug_crop(self, tag: str = "crop") -> str:
+        """保存当前 OCR 裁剪区，便于核对是否截到最新消息。"""
+        try:
+            from pathlib import Path
+
+            out_dir = Path("logs") / "voice_transcribe"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            path = out_dir / f"ocr_{tag}_{int(time.time())}.png"
+            crop = self.capture_chat_region()
+            cv2.imwrite(str(path), crop)
+            logger.info(
+                f"[{self.account_id}] OCR 裁剪区截图: {path} "
+                f"(y {self._chat_y_top()}-{self._chat_y_bottom()})"
+            )
+            return str(path)
+        except Exception as e:
+            logger.debug(f"保存 OCR 裁剪截图失败: {e}")
+            return ""
+
     def ocr_from_crop(
         self,
         crop_bgr: np.ndarray,
@@ -117,7 +199,7 @@ class ChatHistoryReader:
     ) -> list[dict]:
         """对给定聊天区域截图做 OCR（不滚动、不重新截屏）。"""
         x_mid = int(self.w * 0.52)
-        y_top = int(self.h * 0.10)
+        y_top = self._chat_y_top()
 
         reader = self._ensure_ocr()
         raw = reader.readtext(crop_bgr)
@@ -217,9 +299,12 @@ class ChatHistoryReader:
         Returns:
             [{"role": "self"|"friend", "text": "...", "type": "text"|"voice"}, ...]
         """
+        self.scroll_to_bottom(times=1)
+        time.sleep(0.4)
         visible = self._collect_visible_ocr(scroll_up)
 
         merged_all = self._merge_lines(visible, contact_name=contact_name)
+        merged_all = self._dedupe_scroll_ghosts(merged_all)
         merged_all.sort(key=lambda x: x.get("y", 0))
 
         voice_bubbles = self._find_voice_bubbles(merged_all, visible, contact_name)
@@ -233,31 +318,99 @@ class ChatHistoryReader:
         transcript_map, consumed_transcript_y = self._map_existing_transcripts(
             voice_bubbles, merged
         )
+        transcript_map = self._filter_invalid_transcripts(
+            transcript_map, voice_bubbles, merged
+        )
 
         transcribe_budget = max(0, max_voice_transcribe)
-        live_transcripts: dict[int, str] = dict(transcript_map)
+        live_transcripts: dict[int, str] = {}
         used_transcript_texts = {
-            self._norm_transcript(t) for t in live_transcripts.values() if t
+            self._norm_transcript(t) for t in transcript_map.values() if t
         }
 
         for vb in sorted(
             voice_bubbles,
-            key=lambda v: (v.get("role") == "self", -v.get("y", 0)),
+            key=lambda v: (
+                not v.get("bbox"),
+                not v.get("confirmed", False),
+                v.get("role") != "friend",
+                -v.get("y", 0),
+            ),
         ):
             y_key = vb.get("y", 0)
-            if live_transcripts.get(y_key):
+            role = vb.get("role", "friend")
+            bbox = vb.get("bbox")
+            live = ""
+            if bbox and vb.get("confirmed"):
+                live = self._ocr_transcript_below_bubble(
+                    vb.get("x", int(self.w * 0.25)),
+                    y_key,
+                    role=role,
+                    bbox=bbox,
+                )
+            if live and not self._is_invalid_transcript(
+                live, y_key, merged, role, bbox=bbox
+            ):
+                live_transcripts[y_key] = live
+                used_transcript_texts.add(self._norm_transcript(live))
                 continue
+            if live:
+                logger.info(
+                    f"[{self.account_id}] 气泡下方 OCR 无效，尝试重新转写 "
+                    f"y={y_key}: {live[:30]}"
+                )
+            cached = transcript_map.get(y_key, "")
+            if cached and self._is_invalid_transcript(
+                cached, y_key, merged, role, bbox=bbox
+            ):
+                logger.info(
+                    f"[{self.account_id}] 丢弃无效缓存转写 y={y_key}: {cached[:30]}"
+                )
+            live_transcripts.pop(y_key, None)
             if transcribe_budget <= 0:
                 break
-            role = vb.get("role", "friend")
             if transcribe_friend_only and role != "friend":
                 continue
-            x, y = self._voice_press_point(
+            if not vb.get("confirmed", False):
+                logger.debug(
+                    f"[{self.account_id}] 跳过未确认语音气泡 "
+                    f"role={role} y={y_key}"
+                )
+                continue
+            if not bbox or vb.get("source") != "cv":
+                logger.debug(
+                    f"[{self.account_id}] 无 CV 定位，跳过转写 "
+                    f"role={role} y={y_key}"
+                )
+                continue
+            if self._has_text_message_near(
+                merged, role, y_key, visible
+            ):
+                logger.info(
+                    f"[{self.account_id}] 同行已有文字气泡，跳过转写 "
+                    f"role={role} y={y_key}"
+                )
+                continue
+            if not self._voice_bubble_position_valid(
+                role,
+                vb.get("x", 0),
+                y_key,
+                bbox=bbox,
+            ):
+                logger.debug(
+                    f"[{self.account_id}] 跳过无效语音坐标 "
+                    f"role={role} y={y_key} bbox={bbox}"
+                )
+                continue
+            px, py = self._voice_press_point(
                 vb.get("x", int(self.w * 0.25)),
                 y_key,
                 role,
+                bbox=bbox,
             )
-            transcript = self.transcribe_voice_at(x, y, role=role)
+            transcript = self.transcribe_voice_at(
+                px, py, role=role, bbox=bbox, merged=merged
+            )
             transcribe_budget -= 1
             if transcript:
                 live_transcripts[y_key] = transcript
@@ -280,7 +433,7 @@ class ChatHistoryReader:
             if voice_match and self._is_probable_text_message(item.get("text", "")):
                 voice_match = None
 
-            if voice_match or self._is_voice_duration(item.get("text", "")):
+            if voice_match or self._is_strict_voice_duration(item.get("text", "")):
                 vb = voice_match or {"y": y_key, "role": item.get("role", "friend")}
                 vy = vb.get("y", y_key)
                 matched_voice_y.add(vy)
@@ -290,9 +443,9 @@ class ChatHistoryReader:
                 role = vb.get("role", item.get("role", "friend"))
                 transcript = live_transcripts.get(vy, "")
                 if not transcript:
-                    transcript = _VOICE_PLACEHOLDER
+                    transcript = _VOICE_UNTRANSCRIBED_LLM
                     if duration:
-                        transcript = f"{_VOICE_PLACEHOLDER} {duration}秒"
+                        transcript = f"{_VOICE_UNTRANSCRIBED_LLM} {duration}秒"
                 out.append(
                     {
                         "role": role,
@@ -308,7 +461,9 @@ class ChatHistoryReader:
                 role = item.get("role", "friend")
                 vy = y_key
                 matched_voice_y.add(vy)
-                transcript = live_transcripts.get(vy, _VOICE_PLACEHOLDER)
+                transcript = live_transcripts.get(vy, "")
+                if not transcript:
+                    transcript = _VOICE_UNTRANSCRIBED_LLM
                 out.append(
                     {
                         "role": role,
@@ -335,8 +490,10 @@ class ChatHistoryReader:
             role = vb.get("role", "friend")
             duration = vb.get("duration")
             transcript = live_transcripts.get(vy, "")
-            if not transcript or _VOICE_PLACEHOLDER in transcript:
-                continue
+            if not transcript:
+                transcript = _VOICE_UNTRANSCRIBED_LLM
+                if duration:
+                    transcript = f"{_VOICE_UNTRANSCRIBED_LLM} {duration}秒"
             matched_voice_y.add(vy)
             out.append(
                 {
@@ -353,17 +510,78 @@ class ChatHistoryReader:
             item.pop("y", None)
         return out
 
-    def _voice_press_point(self, x: int, y: int, role: str) -> tuple[int, int]:
-        """将 OCR 时长文字坐标校正到气泡可长按区域。"""
-        if role == "self":
-            px = max(x, int(self.w * 0.62))
-            px = min(px, int(self.w * 0.88))
+    def _voice_bubble_position_valid(
+        self,
+        role: str,
+        x: int,
+        y: int,
+        bbox: Optional[tuple[int, int, int, int]] = None,
+    ) -> bool:
+        """语音气泡坐标是否在聊天区且左右归属合理。"""
+        if bbox and len(bbox) >= 4:
+            x1, y1, x2, y2 = (int(v) for v in bbox[:4])
+            x = (x1 + x2) // 2
+            y = (y1 + y2) // 2
+        y_min = self._chat_y_top() + int(self.h * 0.05)
+        y_max = self._chat_y_bottom() - int(self.h * 0.06)
+        if not (y_min <= y <= y_max):
+            return False
+        if role == "friend":
+            return x <= int(self.w * 0.54)
+        return x >= int(self.w * 0.46)
+
+    def _estimate_voice_bbox(
+        self,
+        x: int,
+        y: int,
+        role: str,
+        duration: Optional[int] = None,
+    ) -> tuple[int, int, int, int]:
+        """根据时长 OCR 点估算语音气泡外接框（用于长按中心）。"""
+        dur = max(1, min(int(duration or 3), 60))
+        bubble_w = int(self.w * (0.10 + dur * 0.012))
+        bubble_w = max(int(self.w * 0.14), min(bubble_w, int(self.w * 0.42)))
+        bubble_h = max(int(self.h * 0.028), int(self.h * 0.036))
+        y1 = max(self._chat_y_top(), y - bubble_h // 2)
+        y2 = min(self._chat_y_bottom(), y + bubble_h // 2)
+        if role == "friend":
+            # 好友时长在气泡右侧，框往左扩
+            x2 = min(int(self.w * 0.56), x + int(self.w * 0.03))
+            x1 = max(int(self.w * 0.12), x2 - bubble_w)
         else:
-            if x < int(self.w * 0.16):
-                px = int(self.w * 0.30)
+            # 己方时长在气泡偏左，框往右扩
+            x1 = max(int(self.w * 0.44), x - int(self.w * 0.03))
+            x2 = min(int(self.w * 0.92), x1 + bubble_w)
+        return x1, y1, x2, y2
+
+    def _voice_press_point(
+        self,
+        x: int,
+        y: int,
+        role: str,
+        bbox: Optional[tuple[int, int, int, int]] = None,
+    ) -> tuple[int, int]:
+        """将 OCR/CV 坐标校正到语音气泡可长按中心。"""
+        from config.device_profiles import get_extra
+
+        if bbox and len(bbox) >= 4:
+            x1, y1, x2, y2 = (int(v) for v in bbox[:4])
+            px = (x1 + x2) // 2
+            py = (y1 + y2) // 2
+        else:
+            py = y
+            friend_off = float(get_extra(self.d, "voice_press_friend_x_offset", 0.07))
+            self_off = float(get_extra(self.d, "voice_press_self_x_offset", 0.09))
+            if role == "friend":
+                px = x - int(self.w * friend_off)
+                px = max(int(self.w * 0.20), min(px, int(self.w * 0.46)))
             else:
-                px = max(int(self.w * 0.18), min(x, int(self.w * 0.42)))
-        py = max(int(self.h * 0.12), min(y, int(self.h * 0.80)))
+                px = x + int(self.w * self_off)
+                px = max(int(self.w * 0.58), min(px, int(self.w * 0.84)))
+        py = max(
+            self._chat_y_top() + int(self.h * 0.02),
+            min(py, self._chat_y_bottom() - int(self.h * 0.06)),
+        )
         return px, py
 
     def transcribe_voice_at(
@@ -372,9 +590,14 @@ class ChatHistoryReader:
         y: int,
         retries: int = 2,
         role: str = "friend",
+        bbox: Optional[tuple[int, int, int, int]] = None,
+        merged: Optional[list[dict]] = None,
     ) -> str:
         """长按语音气泡 → 点「转文字」→ OCR 转写结果。"""
-        candidates = self._voice_press_candidates(x, y, role)
+        voice_y = y
+        if bbox and len(bbox) >= 4:
+            voice_y = (int(bbox[1]) + int(bbox[3])) // 2
+        candidates = self._voice_press_candidates(x, y, role, bbox=bbox)
         logger.info(
             f"[{self.account_id}] 开始转写语音 role={role} "
             f"候选点={candidates[:3]}"
@@ -382,8 +605,16 @@ class ChatHistoryReader:
         for attempt in range(retries + 1):
             px, py = candidates[min(attempt, len(candidates) - 1)]
             try:
-                self._long_press(px, py, hold_ms=1000)
+                self._long_press(px, py, hold_ms=1200)
                 time.sleep(0.8)
+                if self._long_press_menu_is_text_only():
+                    logger.info(
+                        f"[{self.account_id}] 按到文字气泡（复制/转发菜单），"
+                        f"放弃转写 @({px},{py})"
+                    )
+                    self._save_debug_screenshot(f"text_menu_{attempt}")
+                    self._dismiss_popup()
+                    return ""
                 if not self._click_voice_to_text_menu():
                     logger.warning(
                         f"[{self.account_id}] 未找到「转文字」菜单 "
@@ -396,14 +627,24 @@ class ChatHistoryReader:
                         continue
                     return ""
 
-                text = self._poll_transcript(px, py, timeout=8.0)
-                self._dismiss_popup()
+                text = self._poll_transcript(
+                    px, py, timeout=8.0, role=role, bbox=bbox
+                )
+                if text and merged and self._is_invalid_transcript(
+                    text, voice_y, merged, role, bbox=bbox
+                ):
+                    logger.info(
+                        f"[{self.account_id}] 转写结果无效（污染/与历史重复），丢弃: "
+                        f"{text[:30]}"
+                    )
+                    text = ""
                 if text and len(text) >= 2:
                     logger.info(
                         f"[{self.account_id}] 语音转写成功: {text[:40]}"
                     )
                     return text
 
+                self._dismiss_popup()
                 logger.warning(
                     f"[{self.account_id}] 转写结果为空 "
                     f"(attempt={attempt + 1}, @({px},{py}))"
@@ -419,24 +660,34 @@ class ChatHistoryReader:
         return ""
 
     def _voice_press_candidates(
-        self, x: int, y: int, role: str
+        self,
+        x: int,
+        y: int,
+        role: str,
+        bbox: Optional[tuple[int, int, int, int]] = None,
     ) -> list[tuple[int, int]]:
-        """生成多个候选长按点，避免点到头像或空白区。"""
-        primary = self._voice_press_point(x, y, role)
-        py = primary[1]
+        """生成多个候选长按点（气泡中心 + 左右/上下微调）。"""
+        primary = self._voice_press_point(x, y, role, bbox=bbox)
+        px0, py0 = primary
         if role == "self":
-            xs = [primary[0], int(self.w * 0.72), int(self.w * 0.68), int(self.w * 0.78)]
+            xs = [px0, int(self.w * 0.68), int(self.w * 0.72), int(self.w * 0.76), int(self.w * 0.80)]
         else:
-            xs = [primary[0], int(self.w * 0.30), int(self.w * 0.35), int(self.w * 0.26)]
+            xs = [px0, int(self.w * 0.26), int(self.w * 0.30), int(self.w * 0.34), int(self.w * 0.38)]
+        ys = [py0, py0 - 12, py0 + 12, py0 - 24, py0 + 24]
         out: list[tuple[int, int]] = []
         seen: set[tuple[int, int]] = set()
-        for px in xs:
-            px = max(int(self.w * 0.12), min(px, int(self.w * 0.88)))
-            key = (px // 8, py // 8)
-            if key in seen:
-                continue
-            seen.add(key)
-            out.append((px, py))
+        for py in ys:
+            for px in xs:
+                px = max(int(self.w * 0.10), min(px, int(self.w * 0.90)))
+                py = max(
+                    self._chat_y_top() + int(self.h * 0.02),
+                    min(py, self._chat_y_bottom() - int(self.h * 0.06)),
+                )
+                key = (px // 6, py // 6)
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append((px, py))
         return out or [primary]
 
     def _click_voice_to_text_menu(self) -> bool:
@@ -480,24 +731,65 @@ class ChatHistoryReader:
         time.sleep(0.3)
         return True
 
-    def _poll_transcript(self, x: int, y: int, timeout: float = 8.0) -> str:
-        """轮询等待微信转写完成并 OCR 读取。"""
+    def _poll_transcript(
+        self,
+        x: int,
+        y: int,
+        timeout: float = 8.0,
+        role: str = "friend",
+        bbox: Optional[tuple[int, int, int, int]] = None,
+    ) -> str:
+        """轮询等待微信转写完成并 OCR 读取（仅气泡下方，不读上方历史文字）。"""
         deadline = time.time() + timeout
         while time.time() < deadline:
-            for fn in (self._ocr_transcript_near_bubble, self._ocr_transcript_below):
-                text = fn(x, y)
-                if text and len(text) >= 2:
-                    return text
+            text = self._ocr_transcript_below_bubble(x, y, role=role, bbox=bbox)
+            if text and len(text) >= 2:
+                return text
             time.sleep(0.7)
         return ""
 
-    def _ocr_transcript_near_bubble(self, x: int, y: int) -> str:
-        """OCR 气泡本体及紧邻区域（转写可能覆盖气泡或紧贴下方）。"""
-        y0 = max(int(self.h * 0.10), y - int(self.h * 0.02))
-        y1 = min(int(self.h * 0.84), y + int(self.h * 0.12))
-        x0 = max(0, x - int(self.w * 0.42))
-        x1 = min(self.w, x + int(self.w * 0.42))
-        return self._ocr_best_text_in_region(x0, y0, x1, y1)
+    def _bubble_bottom_y(
+        self,
+        y: int,
+        bbox: Optional[tuple[int, int, int, int]] = None,
+    ) -> int:
+        if bbox and len(bbox) >= 4:
+            return int(bbox[3])
+        return y + int(self.h * 0.016)
+
+    def _ocr_transcript_below_bubble(
+        self,
+        x: int,
+        y: int,
+        role: str = "friend",
+        bbox: Optional[tuple[int, int, int, int]] = None,
+    ) -> str:
+        """OCR 语音气泡正下方的转写灰字（禁止向上扫到历史聊天气泡）。"""
+        bottom = self._bubble_bottom_y(y, bbox)
+        y0 = max(self._chat_y_top(), bottom + 4)
+        y1 = min(self._chat_y_bottom(), bottom + int(self.h * 0.10))
+        x0, x1 = self._transcript_x_bounds(role, x)
+        return self._ocr_best_text_in_region(
+            x0, y0, x1, y1, role=role, anchor_y=bottom, below_only=True
+        )
+
+    def _ocr_transcript_below(self, x: int, y: int, role: str = "friend") -> str:
+        """兼容旧调用：仅读气泡下方。"""
+        return self._ocr_transcript_below_bubble(x, y, role=role)
+
+    def _transcript_x_bounds(self, role: str, x: int) -> tuple[int, int]:
+        """按发言方限制 OCR 横向范围，避免读到对侧气泡的转写文字。"""
+        if role == "self":
+            x0 = max(int(self.w * 0.46), x - int(self.w * 0.38))
+            x1 = min(self.w, x + int(self.w * 0.38))
+        else:
+            x0 = max(0, x - int(self.w * 0.38))
+            x1 = min(int(self.w * 0.54), x + int(self.w * 0.38))
+        return x0, x1
+
+    def _ocr_transcript_near_bubble(self, x: int, y: int, role: str = "friend") -> str:
+        """仅读气泡下方转写（保留兼容入口）。"""
+        return self._ocr_transcript_below_bubble(x, y, role=role)
 
     def _ocr_best_text_in_region(
         self,
@@ -505,6 +797,9 @@ class ChatHistoryReader:
         y0: int,
         x1: int,
         y1: int,
+        role: str = "",
+        anchor_y: int = 0,
+        below_only: bool = False,
     ) -> str:
         img = np.array(self.d.screenshot(format="pillow"))
         gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
@@ -512,28 +807,45 @@ class ChatHistoryReader:
             self._clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         enhanced = cv2.cvtColor(self._clahe.apply(gray), cv2.COLOR_GRAY2BGR)
 
-        lines: list[tuple[int, float, str]] = []
-        for text, _cx, cy, conf in self._ocr_region(enhanced, x0, y0, x1, y1):
+        x_mid = int(self.w * 0.52)
+        lines: list[tuple[int, int, float, str]] = []
+        for text, cx, cy, conf in self._ocr_region(enhanced, x0, y0, x1, y1):
             t = str(text or "").strip()
             if not t or self._is_noise(t):
                 continue
             if self._is_voice_duration(t) or self._is_voice_marker(t):
                 continue
-            if self._is_chat_timestamp(t, _cx):
+            if self._is_chat_timestamp(t, cx):
                 continue
             if not self._looks_like_transcript(t):
                 continue
-            lines.append((cy, conf, t))
+            if role == "friend" and cx >= x_mid:
+                continue
+            if role == "self" and cx < x_mid:
+                continue
+            lines.append((cy, cx, conf, t))
 
         if not lines:
             return ""
 
-        lines.sort(key=lambda item: (item[0], -item[1]))
+        if anchor_y > 0:
+            min_cy = anchor_y + (int(self.h * 0.012) if below_only else -int(self.h * 0.01))
+            below = [
+                (cy - anchor_y, -conf, t)
+                for cy, _cx, conf, t in lines
+                if cy >= min_cy
+            ]
+            if below:
+                below.sort()
+                parts = [t for _, _, t in below]
+                return self._join_text_parts(parts)
+
+        lines.sort(key=lambda item: (item[0], -item[2]))
         row_tol = int(self.h * 0.025)
         merged: list[str] = []
         bucket_y = -1
         bucket_parts: list[str] = []
-        for cy, _conf, t in lines:
+        for cy, _cx, _conf, t in lines:
             if bucket_y < 0 or abs(cy - bucket_y) > row_tol:
                 if bucket_parts:
                     merged.append(self._join_text_parts(bucket_parts))
@@ -545,7 +857,27 @@ class ChatHistoryReader:
             merged.append(self._join_text_parts(bucket_parts))
 
         merged = [m for m in merged if len(m) >= 2]
-        return max(merged, key=len) if merged else ""
+        if not merged:
+            return ""
+        if anchor_y > 0:
+            scored = [
+                (abs(self._estimate_text_y(merged, lines, m) - anchor_y), len(m), m)
+                for m in merged
+            ]
+            scored.sort()
+            return scored[0][2]
+        return max(merged, key=len)
+
+    def _estimate_text_y(
+        self,
+        merged_text: str,
+        lines: list[tuple[int, int, float, str]],
+        target: str,
+    ) -> int:
+        for cy, _cx, _conf, t in lines:
+            if t in target or target in t:
+                return cy
+        return 0
 
     @staticmethod
     def _join_text_parts(parts: list[str]) -> str:
@@ -596,21 +928,113 @@ class ChatHistoryReader:
                 return True
         return False
 
-    def _ocr_transcript_below(self, x: int, y: int) -> str:
-        """OCR 语音气泡下方带状区域的转写文字。"""
-        y0 = max(int(self.h * 0.10), y + 15)
-        y1 = min(int(self.h * 0.84), y + int(self.h * 0.14))
-        x0 = max(0, x - int(self.w * 0.42))
-        x1 = min(self.w, x + int(self.w * 0.42))
-        return self._ocr_best_text_in_region(x0, y0, x1, y1)
-
     def _dismiss_popup(self) -> None:
-        """关闭长按菜单（避免 back 取消已展示的转写文字）。"""
+        """关闭长按菜单 / 多选模式（避免误触返回退出聊天）。"""
         try:
-            self.d.click(int(self.w * 0.5), int(self.h * 0.06))
+            el = self.d(text="取消")
+            if el.exists(timeout=0.4):
+                el.click()
+                time.sleep(0.3)
+                return
+        except Exception:
+            pass
+        try:
+            safe_y = self._chat_y_top() + int(self.h * 0.06)
+            self.d.click(int(self.w * 0.50), safe_y)
             time.sleep(0.25)
         except Exception:
             pass
+
+    def _long_press_menu_is_text_only(self) -> bool:
+        """长按后出现文字消息菜单（复制/转发）而非语音转文字菜单。"""
+        try:
+            if self.d(text="转文字").exists(timeout=0.5):
+                return False
+        except Exception:
+            pass
+        try:
+            img = np.array(self.d.screenshot(format="pillow"))
+            gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+            if self._clahe is None:
+                self._clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            enhanced = cv2.cvtColor(self._clahe.apply(gray), cv2.COLOR_GRAY2BGR)
+            blob = " ".join(
+                t for t, _cx, _cy, conf in self._ocr_region(
+                    enhanced, 0, 0, self.w, self.h
+                )
+                if conf > 0.2
+            )
+            if any(kw in blob for kw in _VOICE_MENU_KEYWORDS):
+                return False
+            if "转" in blob and "文" in blob:
+                return False
+            # 语音菜单也有「多选」，不能用多选判断；复制/转发仅文字气泡有
+            if "复制" in blob or "转发" in blob:
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _verify_voice_bubble_visual(
+        self,
+        bbox: Optional[tuple[int, int, int, int]],
+        role: str,
+    ) -> bool:
+        """转写前视觉校验：排除文字泡、红包、过宽气泡。"""
+        if not bbox or len(bbox) < 4:
+            return False
+        x1, y1, x2, y2 = (int(v) for v in bbox[:4])
+        bw, bh = max(1, x2 - x1), max(1, y2 - y1)
+        if bw > int(self.w * 0.42):
+            return False
+        if bh > int(self.h * 0.055):
+            return False
+        try:
+            img = np.array(self.d.screenshot(format="pillow"))
+            gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+            if self._clahe is None:
+                self._clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            enhanced = cv2.cvtColor(self._clahe.apply(gray), cv2.COLOR_GRAY2BGR)
+            pad = 4
+            cx0 = max(0, x1 - pad)
+            cy0 = max(0, y1 - pad)
+            cx1 = min(self.w, x2 + pad)
+            cy1 = min(self.h, y2 + pad)
+            crop = enhanced[cy0:cy1, cx0:cx1]
+            if crop.size == 0:
+                return False
+            texts: list[str] = []
+            for t, _cx, _cy, conf in self._ocr_region(enhanced, cx0, cy0, cx1, cy1):
+                if conf > 0.15:
+                    texts.append(t)
+            blob = "".join(texts)
+            if self._is_special_non_voice_bubble(blob):
+                return False
+            cjk = re.findall(r"[\u4e00-\u9fff]", blob)
+            if len(cjk) >= 4:
+                return False
+            for t in texts:
+                if self._is_strict_voice_duration(t):
+                    return True
+            duration, _ = self._ocr_duration_from_bubble_crop(crop)
+            return duration is not None
+        except Exception as e:
+            logger.debug(f"[{self.account_id}] 语音视觉校验失败: {e}")
+            return False
+
+    @staticmethod
+    def _is_special_non_voice_bubble(text: str) -> bool:
+        t = str(text or "")
+        markers = (
+            "红包",
+            "恭喜发财",
+            "微信红包",
+            "转账",
+            "[图片]",
+            "[视频]",
+            "[文件]",
+        )
+        return any(m in t for m in markers)
 
     def _ocr_region(
         self,
@@ -636,22 +1060,73 @@ class ChatHistoryReader:
 
     @staticmethod
     def _is_voice_duration(text: str) -> bool:
+        return ChatHistoryReader._parse_voice_duration(text) is not None
+
+    @staticmethod
+    def _is_strict_voice_duration(text: str) -> bool:
+        """
+        严格语音时长：必须带引号/秒标记，避免把文字里的孤立数字误判为语音。
+        例：3''、5"  ✓    纯 3、123、文字碎片  ✗
+        """
         t = re.sub(r"\s+", "", str(text or "").strip())
         if not t:
             return False
         if _VOICE_DURATION_RE.match(t):
-            return True
-        if re.fullmatch(r"['″\"″]+", t):
-            return True
+            return ChatHistoryReader._parse_voice_duration(t) is not None
+        if len(t) > 12:
+            return False
+        if re.search(r"\d\s*['″\"″秒]", t) or re.search(r"['″\"″]\s*\d", t):
+            return ChatHistoryReader._parse_voice_duration(t) is not None
         return False
 
     @staticmethod
     def _parse_voice_duration(text: str) -> Optional[int]:
         t = re.sub(r"\s+", "", str(text or "").strip())
-        m = re.match(r"(\d{1,3})", t)
-        if m:
-            return int(m.group(1))
+        if not t:
+            return None
+        if _VOICE_DURATION_RE.match(t):
+            m = re.match(r"(\d+)", t)
+            if m:
+                val = int(m.group(1))
+                return val if 1 <= val <= 60 else None
+        if re.fullmatch(r"['″\"″]+", t):
+            return None
+        # OCR 常把波形括号与秒数粘在一起，如 "))2''"
+        m = _VOICE_DURATION_IN_TEXT_RE.search(t)
+        if m and len(t) <= 12:
+            val = int(m.group(1))
+            return val if 1 <= val <= 60 else None
         return None
+
+    def _ocr_duration_from_bubble_crop(
+        self, bubble_bgr: np.ndarray
+    ) -> tuple[Optional[int], str]:
+        """在气泡裁剪区内 OCR 识别 1-60 秒时长（波形图标右侧数字）。"""
+        if bubble_bgr is None or bubble_bgr.size == 0:
+            return None, ""
+        reader = self._ensure_ocr()
+        h, w = bubble_bgr.shape[:2]
+        regions = [bubble_bgr]
+        if w >= 40:
+            regions.append(bubble_bgr[:, int(w * 0.30):])
+            regions.append(bubble_bgr[:, : int(w * 0.70)])
+        if w >= 60:
+            regions.append(bubble_bgr[:, int(w * 0.45):])
+            regions.append(bubble_bgr[:, : int(w * 0.55)])
+
+        for region in regions:
+            if region.size == 0:
+                continue
+            for _bbox, text, conf in reader.readtext(region):
+                if conf < 0.12:
+                    continue
+                t = str(text or "").strip()
+                if not ChatHistoryReader._is_strict_voice_duration(t):
+                    continue
+                duration = self._parse_voice_duration(t)
+                if duration:
+                    return duration, t
+        return None, ""
 
     def _is_chat_timestamp(self, text: str, x: int = 0) -> bool:
         t = re.sub(r"\s+", "", str(text or "").strip())
@@ -708,10 +1183,55 @@ class ChatHistoryReader:
                 return vb
         return None
 
+    def _voice_row_tolerance(self) -> int:
+        """同一气泡行判定容差（约一条语音条高度，避免上下相邻消息误判）。"""
+        return int(self.h * 0.02)
+
+    def _has_text_message_near(
+        self,
+        merged: list[dict],
+        role: str,
+        y: int,
+        raw_items: Optional[list[dict]] = None,
+    ) -> bool:
+        """同一物理行若已有正常文字气泡，则不应再判为语音。"""
+        tol = self._voice_row_tolerance()
+        for item in list(merged) + list(raw_items or []):
+            if item.get("role") != role:
+                continue
+            if abs(int(item.get("y", 0)) - y) > tol:
+                continue
+            text = str(item.get("text", "")).strip()
+            if not text:
+                continue
+            if self._is_strict_voice_duration(text) or self._is_voice_marker(text):
+                continue
+            if self._is_voice_duration(text) and not self._is_strict_voice_duration(text):
+                continue
+            if self._is_probable_text_message(text):
+                return True
+            if len(text) >= 4:
+                return True
+        return False
+
     def _on_bubble_side(self, role: str, x: int) -> bool:
         if role == "self":
             return x >= int(self.w * 0.50)
         return x <= int(self.w * 0.50)
+
+    def _bubble_exists_near(
+        self,
+        bubbles: list[dict],
+        y: int,
+        role: str,
+    ) -> bool:
+        tol = int(self.h * 0.04)
+        for vb in bubbles:
+            if vb.get("role") != role:
+                continue
+            if abs(int(vb.get("y", 0)) - y) <= tol:
+                return True
+        return False
 
     def _find_voice_bubbles(
         self,
@@ -724,33 +1244,97 @@ class ChatHistoryReader:
         bubbles: list[dict] = []
         seen: set[tuple[str, int]] = set()
 
-        def _add(role: str, y: int, x: int, duration_text: str = "") -> None:
+        def _add(
+            role: str,
+            y: int,
+            x: int,
+            duration_text: str = "",
+            confirmed: bool = False,
+            bbox: Optional[tuple[int, int, int, int]] = None,
+            source: str = "",
+        ) -> None:
             bucket = y // max(row_tol, 1)
             key = (role, bucket)
             if key in seen:
                 return
+            strict_duration = self._is_strict_voice_duration(duration_text)
+            is_confirmed = bool(confirmed and source == "cv" and bbox and strict_duration)
+            if is_confirmed and self._has_text_message_near(
+                merged, role, y, raw_items
+            ):
+                return
+            if is_confirmed and not self._voice_bubble_position_valid(
+                role, x, y, bbox=bbox
+            ):
+                return
             seen.add(key)
-            bubbles.append(
-                {
-                    "role": role,
-                    "y": y,
-                    "x": x
-                    if x
-                    else (
-                        int(self.w * 0.75) if role == "self" else int(self.w * 0.25)
-                    ),
-                    "duration": self._parse_voice_duration(duration_text),
-                }
+            entry = {
+                "role": role,
+                "y": y,
+                "x": x
+                if x
+                else (
+                    int(self.w * 0.75) if role == "self" else int(self.w * 0.25)
+                ),
+                "duration": self._parse_voice_duration(duration_text),
+                "confirmed": is_confirmed,
+                "source": source,
+            }
+            if bbox:
+                entry["bbox"] = bbox
+            bubbles.append(entry)
+
+        for vb in self._find_voice_bubbles_cv(merged):
+            _add(
+                vb["role"],
+                vb["y"],
+                vb["x"],
+                vb.get("text", ""),
+                confirmed=True,
+                bbox=vb.get("bbox"),
+                source="cv",
+            )
+        for vb in self._find_voice_bubbles_bottom_strip():
+            _add(
+                vb["role"],
+                vb["y"],
+                vb["x"],
+                vb.get("text", ""),
+                confirmed=True,
+                bbox=vb.get("bbox"),
+                source="cv",
             )
 
         for item in merged:
             text = item.get("text", "")
-            if self._is_voice_duration(text) or self._is_voice_marker(text):
+            if not self._is_strict_voice_duration(text):
+                continue
+            role = item.get("role", "friend")
+            iy = item.get("y", 0)
+            ix = item.get("x", 0)
+            if self._bubble_exists_near(bubbles, iy, role):
+                continue
+            refined = self._locate_voice_bbox_near(role, iy, ix)
+            if not refined:
+                refined = self._try_confirm_estimated_voice_bbox(role, ix, iy, text)
+            if refined:
                 _add(
-                    item.get("role", "friend"),
-                    item.get("y", 0),
-                    item.get("x", 0),
+                    role,
+                    refined["y"],
+                    refined["x"],
                     text,
+                    confirmed=True,
+                    bbox=refined["bbox"],
+                    source="cv",
+                )
+            else:
+                _add(
+                    role,
+                    iy,
+                    ix,
+                    text,
+                    confirmed=False,
+                    source="ocr",
                 )
 
         for raw in raw_items:
@@ -762,17 +1346,48 @@ class ChatHistoryReader:
                 continue
             if not self._on_bubble_side(role, x):
                 continue
-            if self._is_voice_duration(text) or self._is_voice_fragment(text):
-                _add(role, y, x, text)
+            if self._is_strict_voice_duration(text):
+                if self._bubble_exists_near(bubbles, y, role):
+                    continue
+                refined = self._locate_voice_bbox_near(role, y, x)
+                if not refined:
+                    refined = self._try_confirm_estimated_voice_bbox(role, x, y, text)
+                if refined:
+                    _add(
+                        role,
+                        refined["y"],
+                        refined["x"],
+                        text,
+                        confirmed=True,
+                        bbox=refined["bbox"],
+                        source="cv",
+                    )
+                else:
+                    _add(role, y, x, text, confirmed=False, source="ocr")
             elif self._is_voice_marker(text):
-                _add(role, y, x, text)
+                if self._bubble_exists_near(bubbles, y, role):
+                    continue
+                _add(role, y, x, text, confirmed=False, source="ocr")
 
-        self._infer_voice_near_timestamps(merged, raw_items, _add)
-        self._infer_voice_in_message_gaps(merged, _add)
-        for vb in self._find_voice_bubbles_cv(merged):
-            _add(vb["role"], vb["y"], vb["x"], "")
-        for vb in self._find_voice_bubbles_vision(contact_name):
-            _add(vb["role"], vb["y"], vb["x"], "")
+        friend_count = sum(1 for b in bubbles if b.get("role") == "friend")
+        self_count = sum(1 for b in bubbles if b.get("role") == "self")
+        if friend_count == 0 and self_count == 0:
+            for vb in self._find_voice_bubbles_vision(
+                contact_name,
+                need_friend=True,
+                need_self=True,
+            ):
+                if not vb.get("duration"):
+                    continue
+                dur = int(vb["duration"])
+                _add(
+                    vb["role"],
+                    vb["y"],
+                    vb["x"],
+                    f"{dur}''",
+                    confirmed=False,
+                    source="vision",
+                )
 
         bubbles.sort(key=lambda b: b.get("y", 0))
         logger.info(
@@ -872,87 +1487,306 @@ class ChatHistoryReader:
             mid_y = (y1 + y2) // 2
             add_fn("friend", mid_y, int(self.w * 0.30), "")
 
+    def _scan_voice_durations_by_side(
+        self, raw_items: list[dict]
+    ) -> list[dict]:
+        """按左右半屏补扫 OCR 漏掉的语音时长（好友白底气泡常见）。"""
+        x_mid = int(self.w * 0.52)
+        found: list[dict] = []
+        seen: set[tuple[str, int]] = set()
+        row_tol = int(self.h * 0.035)
+
+        for item in raw_items:
+            text = str(item.get("text", "")).strip()
+            x = item.get("x", 0)
+            y = item.get("y", 0)
+            if self._is_chat_timestamp(text, x):
+                continue
+            if not self._is_strict_voice_duration(text):
+                continue
+            role = "self" if x >= x_mid else "friend"
+            bucket = y // max(row_tol, 1)
+            key = (role, bucket)
+            if key in seen:
+                continue
+            seen.add(key)
+            found.append({"role": role, "y": y, "x": x, "text": text})
+
+        crop = self.capture_chat_region()
+        y_top = self._chat_y_top()
+        reader = self._ensure_ocr()
+        for role, x0_pct, x1_pct in (
+            ("friend", 0.0, 0.56),
+            ("self", 0.44, 1.0),
+        ):
+            x0 = int(self.w * x0_pct)
+            x1 = int(self.w * x1_pct)
+            side_crop = crop[:, int(self.w * x0_pct): int(self.w * x1_pct)]
+            raw = reader.readtext(side_crop)
+            for bbox, text, conf in raw:
+                if conf < 0.22:
+                    continue
+                t = str(text or "").strip()
+                if not self._is_strict_voice_duration(t):
+                    continue
+                xs = [p[0] for p in bbox]
+                ys = [p[1] for p in bbox]
+                cx = int(sum(xs) / len(xs)) + x0
+                cy = int(sum(ys) / len(ys)) + y_top
+                bucket = cy // max(row_tol, 1)
+                key = (role, bucket)
+                if key in seen:
+                    continue
+                seen.add(key)
+                found.append({"role": role, "y": cy, "x": cx, "text": t})
+        return found
+
+    def _locate_voice_bbox_near(
+        self,
+        role: str,
+        y: int,
+        x_hint: int = 0,
+    ) -> Optional[dict]:
+        """在 OCR 时长点附近做局部 CV，获取可长按的语音气泡 bbox。"""
+        y_top = self._chat_y_top()
+        crop = self.capture_chat_region()
+        h_crop, w_crop = crop.shape[:2]
+        pad_y = int(self.h * 0.045)
+        y_local = y - y_top
+        y1 = max(0, y_local - pad_y)
+        y2 = min(h_crop, y_local + pad_y)
+        if y2 - y1 < 12:
+            return None
+
+        if role == "friend":
+            x0_pct, x1_pct, min_w, min_h = 0.0, 0.58, 48, 14
+        else:
+            x0_pct, x1_pct, min_w, min_h = 0.42, 1.0, 60, 16
+        x0 = int(w_crop * x0_pct)
+        x1 = int(w_crop * x1_pct)
+        strip = crop[y1:y2, x0:x1]
+        if strip.size == 0:
+            return None
+
+        gray = cv2.cvtColor(strip, cv2.COLOR_BGR2GRAY)
+        bg = float(np.median(gray))
+        _, mask = cv2.threshold(gray, int(min(bg + 22, 220)), 255, cv2.THRESH_BINARY)
+        adapt = cv2.adaptiveThreshold(
+            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 21, 3
+        )
+        mask = cv2.bitwise_or(mask, adapt)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 3))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+
+        best: Optional[dict] = None
+        best_score = -1.0
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for cnt in contours:
+            x, ly, cw, ch = cv2.boundingRect(cnt)
+            if cw < min_w or ch < min_h or ch > 52:
+                continue
+            if cw > int(w_crop * 0.44):
+                continue
+            aspect = cw / max(ch, 1)
+            if aspect < 1.2 or aspect > 7.0:
+                continue
+            cy_local = ly + ch // 2
+            cy = cy_local + y1 + y_top
+            cx = x + cw // 2 + x0
+            if role == "friend" and cx < int(w_crop * 0.10):
+                continue
+            if x_hint and abs(cx - x_hint) > int(self.w * 0.22):
+                continue
+            bubble_crop = strip[
+                max(0, ly - 1): min(strip.shape[0], ly + ch + 1),
+                max(0, x - 1): min(strip.shape[1], x + cw + 1),
+            ]
+            duration, duration_text = self._ocr_duration_from_bubble_crop(bubble_crop)
+            if not duration:
+                continue
+            y_dist = abs(cy - y)
+            score = 1000.0 - y_dist - abs(cx - x_hint) * 0.5
+            if score > best_score:
+                best_score = score
+                screen_bbox = (
+                    x0 + max(0, x - 1),
+                    y_top + y1 + max(0, ly - 1),
+                    x0 + x + cw + 1,
+                    y_top + y1 + ly + ch + 1,
+                )
+                best = {
+                    "role": role,
+                    "y": cy,
+                    "x": cx,
+                    "duration": duration,
+                    "text": duration_text or f"{duration}''",
+                    "bbox": screen_bbox,
+                }
+        return best
+
+    def _try_confirm_estimated_voice_bbox(
+        self,
+        role: str,
+        x: int,
+        y: int,
+        duration_text: str,
+    ) -> Optional[dict]:
+        """OCR 已识别到时长时，用估算框 + 裁剪区二次确认，避免按到文字气泡。"""
+        duration = self._parse_voice_duration(duration_text)
+        if not duration:
+            return None
+        bbox = self._estimate_voice_bbox(x, y, role, duration)
+        x1, y1, x2, y2 = (int(v) for v in bbox)
+        y_top = self._chat_y_top()
+        chat = self.capture_chat_region()
+        ly1 = max(0, y1 - y_top)
+        ly2 = min(chat.shape[0], y2 - y_top)
+        lx1 = max(0, x1)
+        lx2 = min(chat.shape[1], x2)
+        if ly2 <= ly1 or lx2 <= lx1:
+            return None
+        bubble_crop = chat[ly1:ly2, lx1:lx2]
+        found_dur, found_text = self._ocr_duration_from_bubble_crop(bubble_crop)
+        if not found_dur:
+            return None
+        return {
+            "role": role,
+            "y": (y1 + y2) // 2,
+            "x": (x1 + x2) // 2,
+            "duration": found_dur,
+            "text": found_text or duration_text,
+            "bbox": bbox,
+        }
+
     def _find_voice_bubbles_cv(self, merged: list[dict]) -> list[dict]:
-        """用浅色气泡轮廓检测 OCR 漏掉的语音条（多为宽扁气泡）。"""
-        y_top = int(self.h * 0.10)
+        """用浅色圆角气泡轮廓 + 气泡内 OCR 识别 1-60 秒时长。"""
+        y_top = self._chat_y_top()
         crop = self.capture_chat_region()
         h_crop, w_crop = crop.shape[:2]
         gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
         bg = float(np.median(gray))
-        thresh_val = int(min(bg + 28, 225))
+        thresh_val = int(min(bg + 24, 220))
         _, mask = cv2.threshold(gray, thresh_val, 255, cv2.THRESH_BINARY)
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (11, 5))
+        adapt = cv2.adaptiveThreshold(
+            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 4
+        )
+        mask = cv2.bitwise_or(mask, adapt)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (9, 4))
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
 
-        text_rows: dict[str, set[int]] = {"friend": set(), "self": set()}
-        row_tol = int(self.h * 0.03)
-        for item in merged:
-            role = item.get("role", "friend")
-            if self._is_chat_timestamp(item.get("text", ""), item.get("x", 0)):
-                continue
-            if self._is_voice_duration(item.get("text", "")):
-                continue
-            bucket = item.get("y", 0) // max(row_tol, 1)
-            text_rows.setdefault(role, set()).add(bucket)
-
         found: list[dict] = []
-        for role, x0_pct, x1_pct in (
-            ("friend", 0.0, 0.58),
-            ("self", 0.42, 1.0),
+        for role, x0_pct, x1_pct, min_w, min_h in (
+            ("friend", 0.0, 0.58, 52, 16),
+            ("self", 0.42, 1.0, 70, 20),
         ):
             x0 = int(w_crop * x0_pct)
             x1 = int(w_crop * x1_pct)
             region = mask[:, x0:x1]
+            color_region = crop[:, x0:x1]
             contours, _ = cv2.findContours(
                 region, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
             )
             for cnt in contours:
                 x, y, cw, ch = cv2.boundingRect(cnt)
-                if cw < 80 or ch < 22 or ch > 58:
+                if cw < min_w or ch < min_h or ch > 52:
                     continue
-                if cw / max(ch, 1) < 1.8:
+                if cw > int(w_crop * 0.44):
+                    continue
+                aspect = cw / max(ch, 1)
+                if aspect < 1.35 or aspect > 6.5:
                     continue
                 cy = y + ch // 2 + y_top
                 cx = x + cw // 2 + x0
-                if role == "friend" and cx < int(w_crop * 0.14):
+                if role == "friend" and cx < int(w_crop * 0.10):
                     continue
-                bucket = cy // max(row_tol, 1)
-                if bucket in text_rows.get(role, set()):
+                if self._has_text_message_near(merged, role, cy):
                     continue
-                found.append({"role": role, "y": cy, "x": cx})
+
+                pad = 2
+                y1 = max(0, y - pad)
+                y2 = min(h_crop, y + ch + pad)
+                x1c = max(0, x - pad)
+                x2c = min(color_region.shape[1], x + cw + pad)
+                bubble_crop = color_region[y1:y2, x1c:x2c]
+                duration, duration_text = self._ocr_duration_from_bubble_crop(
+                    bubble_crop
+                )
+                if not duration:
+                    continue
+                screen_bbox = (
+                    x0 + x1c,
+                    y_top + y1,
+                    x0 + x2c,
+                    y_top + y2,
+                )
+                text = duration_text or f"{duration}''"
+                found.append(
+                    {
+                        "role": role,
+                        "y": cy,
+                        "x": cx,
+                        "duration": duration,
+                        "text": text,
+                        "confirmed": True,
+                        "source": "cv",
+                        "bbox": screen_bbox,
+                    }
+                )
         return found
 
-    def _find_voice_bubbles_vision(self, contact_name: str) -> list[dict]:
-        """Vision 兜底：OCR/CV 均未发现好友语音时调用。"""
+    def _find_voice_bubbles_vision(
+        self,
+        contact_name: str,
+        need_friend: bool = True,
+        need_self: bool = True,
+        focus_side: str = "",
+    ) -> list[dict]:
+        """Vision 兜底：OCR/CV 均未发现某侧语音时调用。"""
+        if not need_friend and not need_self:
+            return []
         try:
             from content.llm_client import LLMClient
 
             llm = LLMClient()
             if not llm.vision_available:
+                logger.warning(
+                    f"[{self.account_id}] Vision 未配置，跳过语音气泡识图兜底"
+                )
                 return []
             crop = self.capture_chat_region()
             ok, buf = cv2.imencode(".jpg", crop, [cv2.IMWRITE_JPEG_QUALITY, 80])
             if not ok:
                 return []
-            y_top = int(self.h * 0.10)
+            y_top = self._chat_y_top()
             crop_h = int(self.h * 0.74)
-            raw = llm.detect_voice_bubbles_from_image(buf.tobytes())
+            raw = llm.detect_voice_bubbles_from_image(
+                buf.tobytes(),
+                focus_side=focus_side,
+            )
             out: list[dict] = []
             for item in raw:
                 role = item.get("role", "friend")
                 if role not in ("self", "friend"):
+                    continue
+                if role == "friend" and not need_friend:
+                    continue
+                if role == "self" and not need_self:
                     continue
                 y_pct = float(item.get("y_percent", 0))
                 y = int(y_top + y_pct * crop_h)
                 x = int(
                     self.w * (0.75 if role == "self" else 0.22)
                 )
+                duration = item.get("duration")
+                dur_text = f"{duration}''" if duration else ""
                 out.append(
                     {
                         "role": role,
                         "y": y,
                         "x": x,
-                        "duration": item.get("duration"),
+                        "duration": duration,
+                        "text": dur_text,
+                        "confirmed": bool(duration),
                     }
                 )
             if out:
@@ -968,45 +1802,254 @@ class ChatHistoryReader:
     def _norm_transcript(text: str) -> str:
         return re.sub(r"[\s。．.!！?？,，;；]+", "", str(text or "")).strip()
 
+    def _dedupe_scroll_ghosts(self, items: list[dict]) -> list[dict]:
+        """滚动补扫时同一句话会出现在多个 y，只保留最靠下（当前屏）的一条。"""
+        if not items:
+            return items
+        groups: dict[tuple[str, str], list[dict]] = {}
+        for item in items:
+            text = str(item.get("text", "")).strip()
+            if not text:
+                continue
+            key = (item.get("role", ""), self._norm_transcript(text))
+            groups.setdefault(key, []).append(item)
+
+        drop_ids: set[int] = set()
+        y_span = int(self.h * 0.08)
+        for group in groups.values():
+            if len(group) < 2:
+                continue
+            ys = [g.get("y", 0) for g in group]
+            if max(ys) - min(ys) < y_span:
+                continue
+            keep = max(group, key=lambda g: g.get("y", 0))
+            for g in group:
+                if g is not keep:
+                    drop_ids.add(id(g))
+
+        if not drop_ids:
+            return items
+        return [item for item in items if id(item) not in drop_ids]
+
+    def _is_invalid_transcript(
+        self,
+        text: str,
+        voice_y: int,
+        merged: list[dict],
+        role: str,
+        bbox: Optional[tuple[int, int, int, int]] = None,
+    ) -> bool:
+        if not str(text or "").strip():
+            return True
+        if self._transcript_looks_contaminated(text, voice_y, merged, role):
+            return True
+        return self._transcript_conflicts_with_chat(
+            text, merged, role, voice_y, bbox=bbox
+        )
+
+    def _transcript_conflicts_with_chat(
+        self,
+        text: str,
+        merged: list[dict],
+        role: str,
+        voice_y: int,
+        bbox: Optional[tuple[int, int, int, int]] = None,
+    ) -> bool:
+        """转写内容与同侧其他聊天气泡高度重合（不含该语音正下方的转写灰字行）。"""
+        t = str(text or "").strip()
+        nt = self._norm_transcript(t)
+        bottom = self._bubble_bottom_y(voice_y, bbox)
+        transcript_band = int(self.h * 0.075)
+        for item in merged:
+            if item.get("role") != role:
+                continue
+            other = str(item.get("text", "")).strip()
+            if not other or other == t:
+                continue
+            if self._is_voice_duration(other) or self._is_voice_marker(other):
+                continue
+            if len(other) < 3:
+                continue
+            iy = int(item.get("y", 0))
+            if bottom < iy <= bottom + transcript_band:
+                continue
+            no = self._norm_transcript(other)
+            if other in t or no in nt or nt in no:
+                return True
+            if self._transcript_shares_prefix(nt, no, 4):
+                return True
+        return False
+
+    def _transcript_looks_contaminated(
+        self,
+        text: str,
+        voice_y: int,
+        merged: list[dict],
+        role: str,
+    ) -> bool:
+        """转写文字混入了气泡上方/附近的历史聊天内容。"""
+        t = str(text or "").strip()
+        if not t:
+            return True
+        nt = self._norm_transcript(t)
+        above_tol = int(self.h * 0.02)
+        for item in merged:
+            if item.get("role") != role:
+                continue
+            iy = item.get("y", 0)
+            if iy >= voice_y - above_tol:
+                continue
+            other = str(item.get("text", "")).strip()
+            if len(other) < 3:
+                continue
+            if self._is_voice_duration(other) or self._is_voice_marker(other):
+                continue
+            no = self._norm_transcript(other)
+            if not no:
+                continue
+            if other in t or no in nt or nt in no:
+                return True
+            if self._transcript_shares_prefix(nt, no, min_len=4):
+                return True
+        return False
+
+    @staticmethod
+    def _transcript_shares_prefix(a: str, b: str, min_len: int = 4) -> bool:
+        if not a or not b:
+            return False
+        n = min(len(a), len(b))
+        for size in range(n, min_len - 1, -1):
+            for i in range(len(a) - size + 1):
+                sub = a[i: i + size]
+                if len(sub) >= min_len and sub in b:
+                    return True
+        return False
+
+    def _filter_invalid_transcripts(
+        self,
+        transcript_map: dict[int, str],
+        voice_bubbles: list[dict],
+        merged: list[dict],
+    ) -> dict[int, str]:
+        out: dict[int, str] = {}
+        bubble_by_y = {vb.get("y", 0): vb for vb in voice_bubbles}
+        for vy, text in transcript_map.items():
+            vb = bubble_by_y.get(vy, {})
+            role = vb.get("role", "friend")
+            if self._is_invalid_transcript(
+                text, vy, merged, role, bbox=vb.get("bbox")
+            ):
+                logger.info(
+                    f"[{self.account_id}] 丢弃无效转写 y={vy}: {text[:30]}"
+                )
+                continue
+            out[vy] = text
+        return out
+
+    def _infer_friend_voice_after_self(
+        self,
+        bubbles: list[dict],
+        add_fn,
+    ) -> None:
+        """己方语音下方常见好友回复语音（截图底部左侧白底气泡）。"""
+        if any(b.get("role") == "friend" for b in bubbles):
+            return
+        self_ys = [b.get("y", 0) for b in bubbles if b.get("role") == "self"]
+        if not self_ys:
+            return
+        self_y = max(self_ys)
+        probe_y = min(int(self.h * 0.86), self_y + int(self.h * 0.05))
+        probe_y = max(probe_y, int(self.h * 0.80))
+        add_fn("friend", probe_y, int(self.w * 0.28), "")
+
+    def _find_voice_bubbles_bottom_strip(self) -> list[dict]:
+        """专门扫描聊天区底部左侧，补检 OCR 漏掉的好友语音条。"""
+        y_top = self._chat_y_top()
+        strip_h = int(self.h * 0.24)
+        crop = self.capture_chat_region()
+        h_crop, w_crop = crop.shape[:2]
+        strip_start = max(0, h_crop - strip_h)
+        strip = crop[strip_start:, : int(w_crop * 0.60)]
+        if strip.size == 0:
+            return []
+
+        gray = cv2.cvtColor(strip, cv2.COLOR_BGR2GRAY)
+        adapt = cv2.adaptiveThreshold(
+            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 25, 4
+        )
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (9, 4))
+        mask = cv2.morphologyEx(adapt, cv2.MORPH_CLOSE, kernel)
+
+        found: list[dict] = []
+        contours, _ = cv2.findContours(
+            mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+        for cnt in contours:
+            x, y, cw, ch = cv2.boundingRect(cnt)
+            if cw < 52 or ch < 16 or ch > 52:
+                continue
+            if cw > int(w_crop * 0.44):
+                continue
+            if cw / max(ch, 1) < 1.35:
+                continue
+            cy = y + ch // 2 + strip_start + y_top
+            cx = x + cw // 2
+            if cx < int(w_crop * 0.10):
+                continue
+            bubble_crop = strip[max(0, y - 1): y + ch + 1, max(0, x - 1): x + cw + 1]
+            duration, duration_text = self._ocr_duration_from_bubble_crop(bubble_crop)
+            if not duration:
+                continue
+            screen_bbox = (
+                x,
+                y_top + strip_start + max(0, y - 1),
+                x + cw,
+                y_top + strip_start + y + ch + 1,
+            )
+            found.append(
+                {
+                    "role": "friend",
+                    "y": cy,
+                    "x": cx,
+                    "duration": duration,
+                    "text": duration_text or f"{duration}''",
+                    "confirmed": True,
+                    "source": "cv",
+                    "bbox": screen_bbox,
+                }
+            )
+        return found
+
     def _map_existing_transcripts(
         self,
         voice_bubbles: list[dict],
         merged: list[dict],
     ) -> tuple[dict[int, str], set[int]]:
-        """语音气泡下方若已有转写文字，直接映射 voice_y -> text。"""
-        row_tol = int(self.h * 0.10)
+        """用气泡正下方实时 OCR 读取已展示的转写灰字（不用全屏 merged 坐标）。"""
         result: dict[int, str] = {}
         consumed: set[int] = set()
 
         for vb in voice_bubbles:
+            if not vb.get("confirmed") or not vb.get("bbox"):
+                continue
             vy = vb.get("y", 0)
             role = vb.get("role", "friend")
-            best = ""
-            best_dist = row_tol + 1
-            best_y = 0
-
-            for item in merged:
-                if item.get("role") != role:
-                    continue
-                text = item.get("text", "")
-                if self._is_voice_duration(text) or self._is_voice_marker(text):
-                    continue
-                if not self._looks_like_transcript(text):
-                    continue
-                if self._is_chat_timestamp(text, item.get("x", 0)):
-                    continue
-                iy = item.get("y", 0)
-                if iy <= vy or iy - vy > row_tol:
-                    continue
-                dist = iy - vy
-                if dist < best_dist:
-                    best_dist = dist
-                    best = text
-                    best_y = iy
-
-            if best:
-                result[vy] = best
-                consumed.add(best_y)
+            bbox = vb.get("bbox")
+            text = self._ocr_transcript_below_bubble(
+                vb.get("x", int(self.w * 0.25)),
+                vy,
+                role=role,
+                bbox=bbox,
+            )
+            if not text:
+                continue
+            if self._is_invalid_transcript(
+                text, vy, merged, role, bbox=bbox
+            ):
+                continue
+            result[vy] = text
+            bottom = self._bubble_bottom_y(vy, bbox)
+            consumed.add(bottom + int(self.h * 0.02))
 
         return result, consumed
 
@@ -1014,7 +2057,7 @@ class ChatHistoryReader:
         """OCR 聊天区域并标注左右归属。"""
         crop = self.capture_chat_region()
         x_mid = int(self.w * 0.52)
-        y_top = int(self.h * 0.10)
+        y_top = self._chat_y_top()
 
         reader = self._ensure_ocr()
         raw = reader.readtext(crop)
@@ -1084,7 +2127,7 @@ class ChatHistoryReader:
     @staticmethod
     def _is_voice_fragment(text: str) -> bool:
         t = str(text or "").strip()
-        if re.fullmatch(r"\d{1,3}", t):
+        if re.fullmatch(r"(?:[1-9]|[1-5]\d|60)", t):
             return True
         if re.fullmatch(r"['″\"″]+", t):
             return True
@@ -1108,6 +2151,8 @@ class ChatHistoryReader:
         if len(t) <= 1:
             return True
         if t in _UI_NOISE:
+            return True
+        if any(p.search(t) for p in _UI_NOISE_PATTERNS):
             return True
         if re.fullmatch(r"\[[^\]]+\]", t):
             if ChatHistoryReader._is_voice_marker(t):

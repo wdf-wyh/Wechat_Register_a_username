@@ -20,6 +20,7 @@ LLM 客户端 — 调用 LLM API 生成差异化的聊天内容和朋友圈文�
 
 import hashlib
 import base64
+import json
 import random
 import re
 import time
@@ -30,7 +31,11 @@ from openai import OpenAI
 from config.settings import settings
 from utils.logger import get_logger
 
-import json
+from scripts.chat_history_reader import (
+    _VOICE_PLACEHOLDER,
+    _VOICE_UNTRANSCRIBED_LLM,
+    sanitize_chat_history_for_llm,
+)
 
 logger = get_logger("llm_client")
 
@@ -66,6 +71,188 @@ def _friend_mentioned_share_topic(history: list[dict]) -> bool:
 
 def _looks_like_fake_share(reply: str) -> bool:
     return any(p.search(reply) for p in _SHARE_VIDEO_PATTERNS)
+
+
+def _self_messages(history: list[dict]) -> list[str]:
+    return [
+        str(h.get("text", "")).strip()
+        for h in history
+        if h.get("role") == "self" and str(h.get("text", "")).strip()
+    ]
+
+
+def _reply_contradicts_self_role(history: list[dict], reply: str) -> bool:
+    """检测回复是否把己方立场说成对方立场（如「我转了」却回「钱收到了」）。"""
+    reply = str(reply or "").strip()
+    if not reply:
+        return False
+    self_text = " ".join(_self_messages(history))
+    if not self_text:
+        return False
+
+    if ("转了" in self_text or "转给" in self_text) and (
+        "收到了" in reply or "到账" in reply
+    ):
+        return True
+    if ("你先去" in self_text or "你把" in self_text or "你给娃" in self_text) and (
+        "这就去买" in reply or "我去买" in reply or "我这就" in reply
+    ):
+        return True
+    if "我转" in self_text and "钱收到" in reply:
+        return True
+    return False
+
+
+def _reply_invents_voice_content(reply: str, history: list[dict]) -> bool:
+    if not reply:
+        return False
+    voice_claim_patterns = (
+        "语音里说了",
+        "刚语音",
+        "语音说",
+        "你语音",
+        "我语音",
+        "听了你的语音",
+        "语音讲了",
+        "刚才语音",
+        "语音里讲",
+    )
+    has_untranscribed = any(
+        "未转写" in str(h.get("text", "")) and "不知道内容" in str(h.get("text", ""))
+        for h in history
+    )
+    if has_untranscribed and any(p in reply for p in voice_claim_patterns):
+        return True
+    return False
+
+
+_TOPIC_KEYWORDS = (
+    "外卖",
+    "肯德基",
+    "蛋挞",
+    "测评",
+    "KFC",
+    "kfc",
+)
+
+
+def _friend_text_plain(item: dict) -> str:
+    text = str(item.get("text", "")).strip()
+    for prefix in ("【语音转写】", "【语音-未转写】"):
+        if text.startswith(prefix):
+            text = text[len(prefix):].strip()
+    return text
+
+
+def _safe_reply_from_friend_focus(friend_focus: list[dict]) -> str:
+    """校验失败时，按对方最新消息生成不含外卖等误拼接的短回复。"""
+    if not friend_focus:
+        return ""
+    text = _friend_text_plain(friend_focus[-1])
+    if not text:
+        return ""
+    if "帅" in text and ("吗" in text or "?" in text or "？" in text):
+        return random.choice(["帅啊，必须帅", "你帅得很", "还行吧挺帅的"])
+    if "转钱" in text or "转账" in text:
+        return random.choice(["等等哈", "行，回头说", "知道了"])
+    if text in ("好", "好的", "嗯", "行", "OK", "ok"):
+        return random.choice(["嗯", "好", "行"])
+    return ""
+
+
+def _reply_conflates_voice_with_unrelated_text(reply: str, history: list[dict]) -> bool:
+    """
+    回复把【语音转写】与无关文字话题拼在一起（如语音是「测试语音」却回外卖）。
+    """
+    if not reply:
+        return False
+    if not any(k in reply for k in _TOPIC_KEYWORDS):
+        return False
+    voice_texts = _voice_transcript_texts(history)
+    if not voice_texts:
+        return False
+    voice_blob = "".join(voice_texts)
+    if any(k in voice_blob for k in _TOPIC_KEYWORDS):
+        return False
+    return True
+
+
+def _voice_transcript_texts(history: list[dict]) -> list[str]:
+    texts: list[str] = []
+    for item in history:
+        text = str(item.get("text", "")).strip()
+        if not text or ("未转写" in text and "不知道内容" in text):
+            continue
+        if item.get("type") == "voice":
+            texts.append(text)
+    return texts
+
+
+def _format_history_line(item: dict, contact: str, self_name: str) -> str:
+    text = str(item.get("text", "")).strip()
+    if not text:
+        return ""
+    if item.get("type") == "voice":
+        if "未转写" in text and "不知道内容" in text:
+            body = f"【语音-未转写】{text}"
+        else:
+            body = f"【语音转写】{text}"
+    elif "未转写" in text and "发来语音" in text:
+        body = f"【语音-未转写】{text}"
+    else:
+        body = text
+    if item.get("role") == "self":
+        return f"【我-{self_name}】{body}"
+    return f"【对方-{contact}】{body}"
+
+
+def _format_history_for_prompt(history: list[dict], contact: str, self_name: str) -> str:
+    lines: list[str] = []
+    for item in history[-16:]:
+        line = _format_history_line(item, contact, self_name)
+        if line:
+            lines.append(line)
+    return "\n".join(lines)
+
+
+def _last_nonempty_index(history: list[dict], role: str) -> int:
+    for i in range(len(history) - 1, -1, -1):
+        item = history[i]
+        if item.get("role") != role:
+            continue
+        if str(item.get("text", "")).strip():
+            return i
+    return -1
+
+
+def _analyze_chat_reply_context(
+    history: list[dict],
+) -> tuple[str, list[dict]]:
+    """
+    判断下一条该怎么回。
+
+    Returns:
+        mode: opening | wait | reply
+        friend_focus: 对方最近几条消息（用于强调权重，非唯一上下文）
+    """
+    cleaned = [
+        h for h in history if str(h.get("text", "")).strip()
+    ]
+    if not cleaned:
+        return "opening", []
+
+    friend_msgs = [h for h in cleaned if h.get("role") == "friend"]
+    if not friend_msgs:
+        return "opening", []
+
+    last_friend_i = _last_nonempty_index(cleaned, "friend")
+    last_self_i = _last_nonempty_index(cleaned, "self")
+
+    if last_self_i > last_friend_i:
+        return "wait", []
+
+    focus = friend_msgs[-3:] if len(friend_msgs) >= 3 else friend_msgs
+    return "reply", focus
 
 
 class LLMClient:
@@ -470,67 +657,148 @@ class LLMClient:
             history: [{"role": "self"|"friend", "text": "..."}, ...] 按时间排序
 
         Returns:
-            下一条要发送的消息；失败返回空串
+            下一条要发送的消息；失败或应等待对方时返回空串
         """
         if not history:
             history = []
 
-        system = f"""你是微信用户，正在和好友「{contact}」1v1 聊天。
+        history = sanitize_chat_history_for_llm(history)
+        mode, friend_focus = _analyze_chat_reply_context(history)
+        if mode == "wait":
+            logger.debug(
+                f"chat_reply: 己方已最后发言，等待 {contact} 回复"
+            )
+            return ""
+
+        self_name = str(persona.get("name", "我")).strip() or "我"
+        system = f"""你是微信用户「{self_name}」，正在和好友「{contact}」1v1 聊天。
+
+身份（非常重要，不可搞反）：
+- 你 = 屏幕右侧绿色气泡 = 「{self_name}」
+- 对方 = 屏幕左侧白色气泡 = 「{contact}」
+- 永远以你的立场回复，禁止模仿对方口吻，禁止把自己说过的话换个说法再说一遍
+- 例：若你说过「钱我转了，你去买蛋挞」，对方回「好」，你不能说「钱收到了我去买」——钱是你转的，买蛋挞是对方的事
 
 你的个人画像：
-- 名称：{persona.get('name', '普通用户')}
 - 年龄：{persona.get('age', '25-35')}
 - 城市：{persona.get('city', '北京')}
 - 兴趣：{', '.join(persona.get('hobbies', ['日常']))}
 - 聊天风格：{persona.get('comment_style', '自然随意')}
 
-请根据**完整聊天记录**生成你的下一条微信消息。
+请结合完整聊天记录生成你的下一条微信消息。
 要求：
-- 必须承接上文，不要答非所问或重复刚说过的话
+- 上文所有消息都是上下文；对方提起更早的事要能接上
+- 自然权重：对方越新的消息越优先回应；最新一条必须接住
+- 保持立场一致：不要推翻自己刚说过的话，不要把己方动作说成对方动作
+- 不要自言自语或重复自己刚说过的话
+- 对方问了问题要先回答，再延伸
+- 记录里写「发来语音，未转写，不知道内容」时，严禁编造语音里说了什么；不要写「刚语音里说了」等
+- 对方发来未转写语音时，可简短回应语气，但不要捏造语音具体内容
+- 标记为【语音转写】的内容按字面理解，不要与前后无关的文字消息拼接成一件事
+- 例：【语音转写】「测试语音，测试语音」只是在测试录音，与上文文字「外卖测评搞起」完全无关，禁止把测试语音理解成在说外卖
 - 10-50 字，口语化，像随手打的
 - 少用或不用 emoji，不要句号结尾
 - 只输出消息正文，不要引号、序号或解释
 {_CHAT_AUTHENTICITY_RULES}
 """
         messages: list[dict] = [{"role": "system", "content": system}]
-        # 深聊续聊只需要最近一小段上下文，过长历史会显著增加延迟/超时概率
-        for item in history[-12:]:
-            text = str(item.get("text", "")).strip()
-            if not text:
-                continue
-            role = "assistant" if item.get("role") == "self" else "user"
-            messages.append({"role": role, "content": text})
-
-        if len(messages) == 1:
+        transcript = _format_history_for_prompt(history, contact, self_name)
+        if transcript:
             messages.append(
                 {
                     "role": "user",
-                    "content": (
-                        "（对话刚开始，请用问候或问近况自然开场，"
-                        "禁止以分享视频/链接/媒体开场）"
-                    ),
+                    "content": f"当前聊天记录（按时间）：\n{transcript}",
                 }
             )
-        elif history and history[-1].get("role") == "self":
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": "好的，我已理解完整对话和我的身份立场。",
+                }
+            )
+
+        if mode == "opening":
             messages.append(
                 {
                     "role": "user",
                     "content": (
-                        "（你刚发过消息，对方还没回或回复较慢，"
-                        "可简短追问或聊日常，禁止换到分享/视频/链接话题）"
+                        "请生成你的下一条消息：对话刚开始或对方还没说话，"
+                        "用问候或问近况自然开场，禁止分享视频/链接/媒体。"
                     ),
                 }
             )
         else:
+            latest = friend_focus[-1] if friend_focus else {}
+            latest_text = _format_history_line(latest, contact, self_name) if latest else ""
+            recent_lines = "\n".join(
+                _format_history_line(h, contact, self_name)
+                for h in friend_focus
+                if str(h.get("text", "")).strip()
+            )
             messages.append(
                 {
                     "role": "user",
-                    "content": "（请紧扣对方上一条消息回复，不要跑题）",
+                    "content": (
+                        "请生成你的下一条回复。\n"
+                        f"对方最近几句（权重更高，最新一条必须回应）：\n"
+                        f"{recent_lines}\n\n"
+                        f"最新一条：{latest_text or '（见上文）'}\n\n"
+                        "注意：结合全文理解；优先回应最新话题；"
+                        "保持你的立场一致；不要模仿对方口吻；"
+                        "不要重复自己刚说过的内容；"
+                        "禁止把【语音转写】与无关文字（如外卖测评）混为一谈。"
+                    ),
                 }
             )
 
-        text = self._call_api_messages(messages, temperature=0.88, max_tokens=120)
+        text = self._call_api_messages(messages, temperature=0.72, max_tokens=120)
         reply = (text or "").strip().strip('"\'「」')
+        if reply and _reply_conflates_voice_with_unrelated_text(reply, history):
+            logger.warning(
+                f"chat_reply: 语音与文字话题混淆，触发重写: {reply[:30]}"
+            )
+            latest_friend = friend_focus[-1] if friend_focus else {}
+            latest_plain = _friend_text_plain(latest_friend)
+            retry_messages = list(messages) + [
+                {
+                    "role": "user",
+                    "content": (
+                        f"（上一条不合适：禁止提外卖/肯德基/测评/蛋挞。"
+                        f"只回复对方最新一句「{latest_plain or '见上文'}」，"
+                        "10-30字，口语化。）"
+                    ),
+                }
+            ]
+            text = self._call_api_messages(retry_messages, temperature=0.5, max_tokens=80)
+            reply = (text or "").strip().strip('"\'「」')
+        if reply and _reply_conflates_voice_with_unrelated_text(reply, history):
+            safe = _safe_reply_from_friend_focus(friend_focus)
+            if safe:
+                logger.info(f"chat_reply: 使用对方焦点兜底: {safe}")
+                reply = safe
+            else:
+                logger.warning("chat_reply: 重写后仍混淆语音与文字话题，放弃发送")
+                reply = ""
+        if reply and _reply_invents_voice_content(reply, history):
+            logger.warning(f"chat_reply: 编造语音内容，触发重写: {reply[:30]}")
+            retry_messages = list(messages) + [
+                {
+                    "role": "user",
+                    "content": (
+                        "（上一条不合适：聊天记录里未转写的语音你不知道内容，"
+                        "严禁编造「语音里说了xxx」。请按文字消息正常回复，"
+                        "或简短说没听清/等会听。）"
+                    ),
+                }
+            ]
+            text = self._call_api_messages(retry_messages, temperature=0.55, max_tokens=120)
+            reply = (text or "").strip().strip('"\'「」')
+        if reply and _reply_invents_voice_content(reply, history):
+            logger.warning("chat_reply: 重写后仍编造语音，放弃发送")
+            reply = ""
+        if reply and _reply_contradicts_self_role(history, reply):
+            logger.warning(f"chat_reply: 立场矛盾，触发重写: {reply[:30]}")
+            reply = ""
         if reply and _looks_like_fake_share(reply) and not _friend_mentioned_share_topic(
             history
         ):
@@ -540,18 +808,38 @@ class LLMClient:
                     "content": "（上一条不合适，重写：不要提视频/链接/分享，只聊日常）",
                 }
             ]
-            text = self._call_api_messages(retry_messages, temperature=0.7, max_tokens=120)
+            text = self._call_api_messages(retry_messages, temperature=0.65, max_tokens=120)
+            reply = (text or "").strip().strip('"\'「」')
+        if reply and _reply_contradicts_self_role(history, reply):
+            retry_messages = list(messages) + [
+                {
+                    "role": "user",
+                    "content": (
+                        "（立场错了：不要模仿对方口吻，不要把自己说过的话换个说法。"
+                        "若你转过钱让对方买东西，对方说「好」，你应简短回应如「嗯你去吧」"
+                        "而不是说「钱收到了我去买」。请重写。）"
+                    ),
+                }
+            ]
+            text = self._call_api_messages(retry_messages, temperature=0.6, max_tokens=120)
             reply = (text or "").strip().strip('"\'「」')
         if reply and not (
             _looks_like_fake_share(reply) and not _friend_mentioned_share_topic(history)
-        ):
-            return reply
+        ) and not _reply_contradicts_self_role(history, reply):
+            if not _reply_conflates_voice_with_unrelated_text(reply, history):
+                return reply
 
-        # LLM 请求偶发超时/异常：给一个短兜底，保证“打开会话→OCR→发送”链路可验证
+        if mode == "reply":
+            safe = _safe_reply_from_friend_focus(friend_focus)
+            if safe and not _reply_conflates_voice_with_unrelated_text(safe, history):
+                logger.info(f"chat_reply: reply 模式兜底: {safe}")
+                return safe
+            return ""
+
         fallback = [
-            "在呢，刚看到你消息了",
-            "我这边刚忙完，在呢",
-            "收到啦，我看到了",
+            "在呢，最近怎么样",
+            "哈喽，在忙吗",
+            "在吗，聊两句",
         ]
         return random.choice(fallback)
 
@@ -679,9 +967,13 @@ class LLMClient:
     def detect_voice_bubbles_from_image(
         self,
         image_jpeg: bytes,
+        focus_side: str = "",
     ) -> list[dict]:
         """
         多模态识图：检测聊天截图中的语音气泡位置。
+
+        Args:
+            focus_side: 空=两侧都找；"friend"=只找左侧对方语音
 
         Returns:
             [{"role": "self"|"friend", "y_percent": 0.0~1.0, "duration": int|None}, ...]
@@ -691,8 +983,20 @@ class LLMClient:
             return []
 
         b64 = base64.b64encode(image_jpeg).decode("ascii")
-        prompt = """这是一张微信 1v1 聊天页截图（已裁剪掉输入栏）。
-请找出所有**语音消息气泡**（左侧或右侧带波形图标和秒数，如 3''、5''），不是纯文字气泡。
+        if focus_side == "friend":
+            prompt = """这是一张微信 1v1 聊天页截图（已裁剪掉输入栏）。
+请**只**找出左侧（对方）的**语音消息气泡**（白色气泡，左侧波形图标，右侧秒数 1-60 如 2''、4''），不要右侧自己的绿色语音。
+
+规则：
+1. 只输出左侧对方语音，role 必须为 "friend"
+2. 忽略右侧绿色气泡、居中时间戳、纯文字气泡
+3. y_percent 为气泡垂直中心在图片高度上的比例（0=顶部，1=底部）
+4. 只输出 JSON 数组，无则 []，例如：
+[{"role":"friend","y_percent":0.82,"duration":2}]
+"""
+        else:
+            prompt = """这是一张微信 1v1 聊天页截图（已裁剪掉输入栏）。
+请找出所有**语音消息气泡**（左侧或右侧带波形图标和秒数 1-60，如 3''、5''），不是纯文字气泡。
 
 规则：
 1. 左侧白色/绿色气泡 → role 必须为 "friend"（对方语音，重点找！）
@@ -757,6 +1061,8 @@ class LLMClient:
             if duration is not None:
                 try:
                     duration = int(duration)
+                    if not (1 <= duration <= 60):
+                        duration = None
                 except (TypeError, ValueError):
                     duration = None
             out.append(

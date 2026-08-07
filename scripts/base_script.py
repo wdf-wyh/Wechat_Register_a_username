@@ -548,8 +548,7 @@ class BaseScript(ABC):
         return self.wc.global_search(keyword)
 
     def _handle_send_message(self, params: dict) -> bool:
-        """发送聊天消息（OCR+IME 方案）"""
-        from core.message_sender import MessageSender
+        """发送聊天消息：读历史（含语音转文字）后上下文回复"""
         from scripts.cold_start_templates import NO_MASS_AUTO_REPLY_DAYS
 
         # 前两周禁止群发（一对多 / mass 标记）
@@ -575,23 +574,17 @@ class BaseScript(ABC):
                 return True
             contact = friend["friend_name"]
 
-        text = params.get("text", "")
-        if not text:
-            try:
-                from content.llm_client import LLMClient
-                text = LLMClient().generate_chat_text(
-                    self.persona,
-                    context=self.h.choice(["small_talk", "greeting", "share"]),
-                )
-            except Exception:
-                from content.chat_templates import ChatTemplateManager
-                text = ChatTemplateManager().get_random_chat(
-                    self.h.choice(["small_talk", "greeting", "share"]),
-                    self.persona,
-                )
+        from scripts.manual_deep_chat import send_contextual_reply
 
-        sender = MessageSender(self.wc.d, account_id=self.account_id)
-        return sender.send(contact=contact, message=text)
+        return send_contextual_reply(
+            self.wc.d,
+            contact=contact,
+            persona=self.persona,
+            account_id=self.account_id,
+            text=params.get("text", ""),
+            scroll_up=int(params.get("scroll_up", 1)),
+            max_voice_transcribe=int(params.get("max_voice_transcribe", 4)),
+        )
 
     def _handle_send_image(self, params: dict) -> bool:
         """发送图片（OCR+OpenCV 方案）"""
@@ -622,9 +615,7 @@ class BaseScript(ABC):
         return self.wc.send_emoji()
 
     def _handle_deep_chat(self, params: dict) -> bool:
-        """多轮深度聊天（约 5 分钟）"""
-        from core.social_actions import SocialActions
-
+        """多轮深度聊天：读历史（含语音转文字）→ LLM 回复，约 5 分钟"""
         contact = params.get("contact", "")
         if not contact:
             friend = self.db.get_random_friend(self.account_id, exclude_groups=True)
@@ -638,9 +629,47 @@ class BaseScript(ABC):
             else:
                 contact = friend["friend_name"]
 
-        rounds = params.get("rounds", 5)
-        duration = params.get("duration", 300)
+        duration = int(params.get("duration", 300))
+        scroll_up = int(params.get("scroll_up", 2))
         messages = params.get("messages") or []
+
+        if not params.get("static") and not messages:
+            from scripts.manual_deep_chat import run_ai_session, send_contextual_reply
+            from content.llm_client import LLMClient
+
+            llm = LLMClient()
+            if not llm.available:
+                return send_contextual_reply(
+                    self.wc.d,
+                    contact=contact,
+                    persona=self.persona,
+                    account_id=self.account_id,
+                    scroll_up=scroll_up,
+                )
+            try:
+                return run_ai_session(
+                    self.wc.d,
+                    contact=contact,
+                    persona=self.persona,
+                    account_id=self.account_id,
+                    duration_seconds=duration,
+                    scroll_up=scroll_up,
+                )
+            except Exception as e:
+                logger.warning(
+                    f"[{self.account_id}] AI 深聊失败，发送兜底回复: {e}"
+                )
+                return send_contextual_reply(
+                    self.wc.d,
+                    contact=contact,
+                    persona=self.persona,
+                    account_id=self.account_id,
+                    scroll_up=scroll_up,
+                )
+
+        from core.social_actions import SocialActions
+
+        rounds = params.get("rounds", 5)
         if not messages:
             try:
                 from content.llm_client import LLMClient
@@ -663,7 +692,7 @@ class BaseScript(ABC):
         return SocialActions(self.wc.d, self.account_id).deep_chat(
             contact=contact,
             messages=messages,
-            total_seconds=int(duration),
+            total_seconds=duration,
         )
 
     def _handle_group_chat(self, params: dict) -> bool:
