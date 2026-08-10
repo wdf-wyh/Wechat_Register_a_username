@@ -8,7 +8,10 @@
     - 收藏夹、搜索、支付等日常使用
 """
 
-from scripts.base_script import BaseScript, ActionType, Action, DailyScript, channels_daily_params
+from scripts.base_script import (
+    BaseScript, ActionType, Action, DailyScript,
+    channels_daily_params, moments_daily_params,
+)
 
 
 class NormalUseScript(BaseScript):
@@ -51,9 +54,9 @@ class NormalUseScript(BaseScript):
                 # 19:00 - 聊天（下班闲聊）
                 Action(ActionType.SEND_MESSAGE, "18:30", "20:30", (180, 480),
                        params={"contact_count": (1, 2)}),
-                # 20:00 - 刷朋友圈 + 评论 2-3 条
-                Action(ActionType.SCROLL_MOMENTS, "19:30", "21:00", (300, 600)),
-                Action(ActionType.COMMENT_MOMENT, "20:00", "21:00", (60, 180)),
+                # 20:00 - 每日朋友圈互动 20 次（优先秒评大 V）
+                Action(ActionType.MOMENTS_DAILY_INTERACT, "19:30", "21:30", (600, 900),
+                       params=moments_daily_params(20)),
                 # 22:30 - 睡前朋友圈
                 Action(ActionType.SCROLL_MOMENTS, "21:30", "23:00", (180, 480)),
                 # 23:00-07:00 - 不活跃
@@ -90,9 +93,9 @@ class NormalUseScript(BaseScript):
                 # 17:00 - 支付 + 搜索
                 Action(ActionType.MAKE_PAYMENT, "16:00", "18:00", (60, 300)),
                 Action(ActionType.GLOBAL_SEARCH, "17:00", "19:00", (60, 180)),
-                # 19:00 - 朋友圈 + 评论
-                Action(ActionType.SCROLL_MOMENTS, "18:30", "20:30", (300, 600)),
-                Action(ActionType.COMMENT_MOMENT, "19:00", "20:00", (60, 180)),
+                # 19:00 - 每日朋友圈互动 20 次（优先秒评大 V）
+                Action(ActionType.MOMENTS_DAILY_INTERACT, "18:30", "20:30", (600, 900),
+                       params=moments_daily_params(20)),
                 # 20:00 - 聊天
                 Action(ActionType.SEND_MESSAGE, "19:30", "21:30", (180, 480),
                        params={"contact_count": (1, 3)}),

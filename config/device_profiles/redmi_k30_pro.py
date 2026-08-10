@@ -108,6 +108,13 @@ PROFILE = DeviceProfile(
         "moments_camera": (0.90, 0.054),
         "moments_publish": (0.90, 0.055),
         "moments_dots_x_ratios": (0.93, 0.91, 0.89, 0.95, 0.87),
+        "moments_comment_send": (0.90, 0.93),
+        "moments_comment_send_candidates": [
+            (0.90, 0.93),
+            (0.92, 0.92),
+            (0.88, 0.94),
+            (0.90, 0.96),
+        ],
         # 视频号底栏最右侧评论气泡（数字上方图标）
         "channels_comment_icon": (0.93, 0.88),
         # 半屏评论 + 系统键盘：输入条约在 y=0.52

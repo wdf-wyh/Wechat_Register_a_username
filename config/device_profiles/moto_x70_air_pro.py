@@ -95,6 +95,13 @@ PROFILE = DeviceProfile(
         "moments_camera": (0.83, 0.054),
         "moments_publish": (0.88, 0.056),
         "moments_dots_x_ratios": (0.92, 0.90, 0.88, 0.94, 0.86),
+        "moments_comment_send": (0.90, 0.965),
+        "moments_comment_send_candidates": [
+            (0.90, 0.965),
+            (0.92, 0.96),
+            (0.88, 0.97),
+            (0.90, 0.95),
+        ],
         # 视频号右侧栏评论 / 半屏输入（新增键，不覆盖旧坐标）
         "channels_comment_icon": (0.93, 0.68),
         "channels_comment_input": (0.42, 0.95),

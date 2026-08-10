@@ -7,8 +7,8 @@
 进入微信"发现"→"视频号"，按目标时长刷视频；默认**完播**停留，
 并按概率点赞 / 评论。点赞按钮通过 OCR 识别底部计数定位。
 
-评论默认：OCR 截取当前视频作者/标题/简介 → 交给 ``comment_fn``
-（通常接 LLM）生成贴合内容的短评；失败则回退内置短评池。
+评论默认：截图 + OCR 文案 → ``comment_fn``（Vision 识图优先，OCR+文本 LLM 兜底）
+生成贴合内容的短评；失败则回退内置短评池。
 
 ## 工作流
 
@@ -132,7 +132,8 @@ class ChannelsBrowser:
             finish_watch:      True=尽量完播再滑下一条
             comment_rate:      评论概率（0 关闭）
             comment_texts:     评论文案池；有 ``comment_fn`` 时作兜底
-            comment_fn:        ``(video_context) -> comment``；优先用于按内容评论
+            comment_fn:        ``(video_context, image_jpeg) -> comment``；
+                               旧签名 ``(video_context)`` 仍兼容
 
         Returns:
             {"liked", "commented", "watched", "switched", "elapsed"}
@@ -277,17 +278,47 @@ class ChannelsBrowser:
             logger.debug(f"[{self.account_id}] 视频文案OCR失败: {e}")
             return ""
 
+    def capture_video_frame_jpeg(self, quality: int = 75) -> bytes:
+        """
+        截取当前视频画面 JPEG，裁掉右侧互动栏与底部导航，供 Vision 识图评论。
+        """
+        try:
+            img = np.array(self.d.screenshot(format="pillow"))
+            h, w = img.shape[:2]
+            crop = img[int(h * 0.05):int(h * 0.92), int(w * 0.02):int(w * 0.78)]
+            bgr = cv2.cvtColor(crop, cv2.COLOR_RGB2BGR)
+            ok, buf = cv2.imencode(
+                ".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, int(quality)]
+            )
+            return buf.tobytes() if ok else b""
+        except Exception as e:
+            logger.debug(f"[{self.account_id}] 视频画面截图失败: {e}")
+            return b""
+
+    def _invoke_comment_fn(
+        self,
+        comment_fn: Callable[..., str],
+        context: str,
+        image_jpeg: bytes,
+    ) -> str:
+        """调用 comment_fn；兼容仅接受 video_context 的旧签名。"""
+        try:
+            return (comment_fn(context, image_jpeg) or "").strip()
+        except TypeError:
+            return (comment_fn(context) or "").strip()
+
     def _compose_comment(
         self,
         comment_fn: Callable[[str], str] | None,
         fallback_texts: list[str],
     ) -> str:
-        """OCR 上下文 → comment_fn；失败则回退文案池。"""
+        """截图 + OCR → comment_fn（Vision 优先）；失败则回退文案池。"""
         context = self.extract_video_context()
+        image_jpeg = self.capture_video_frame_jpeg()
         text = ""
         if comment_fn is not None:
             try:
-                text = (comment_fn(context) or "").strip()
+                text = self._invoke_comment_fn(comment_fn, context, image_jpeg)
             except Exception as e:
                 logger.debug(f"[{self.account_id}] comment_fn 失败: {e}")
                 text = ""

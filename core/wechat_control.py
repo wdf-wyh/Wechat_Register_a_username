@@ -215,6 +215,37 @@ class WeChatControl:
             like_rate=like_rate,
         )
 
+    def moments_daily_interact(
+        self,
+        target_count: int = 20,
+        big_v_accounts: list[str] | None = None,
+        comment_fn=None,
+        fresh_minutes: int = 30,
+        max_duration: int = 900,
+    ) -> dict:
+        """
+        每日朋友圈互动：完成指定次数点赞/评论，优先秒评大 V 新帖。
+
+        Args:
+            target_count:   目标互动次数（点赞+评论合计）
+            big_v_accounts: 大 V 昵称/公众号名列表，空则仅按新鲜度排序
+            comment_fn:     (post_content, author) -> 评论文案
+            fresh_minutes:  视为「新帖」的时间窗（分钟）
+            max_duration:   最长执行秒数
+
+        Returns:
+            {"interactions", "liked", "commented", "big_v_commented", "elapsed", "success"}
+        """
+        from core.moments_interact import MomentsInteract
+        mi = MomentsInteract(self.d, account_id=self.account_id)
+        return mi.daily_interact(
+            target_count=target_count,
+            big_v_accounts=big_v_accounts or [],
+            comment_fn=comment_fn,
+            fresh_minutes=fresh_minutes,
+            max_duration=max_duration,
+        )
+
     def post_moment(
         self,
         text: str = "",
@@ -430,7 +461,7 @@ class WeChatControl:
             finish_watch:      尽量完播再切下一条
             comment_rate:      评论概率
             comment_texts:     评论文案池（有 comment_fn 时作兜底）
-            comment_fn:        (video_context) -> comment，按 OCR 文案生成评论
+            comment_fn:        (video_context, image_jpeg) -> comment，Vision 识图优先
 
         Returns:
             {"liked", "commented", "watched", "switched", "elapsed"}

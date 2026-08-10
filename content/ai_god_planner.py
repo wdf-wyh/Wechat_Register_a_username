@@ -281,6 +281,7 @@ class AiGodPlanner:
             ActionType.LIKE_MOMENT: "like_moment",
             ActionType.COMMENT_MOMENT: "comment_moment",
             ActionType.BROWSE_MOMENTS_INTERACT: "like_moment",
+            ActionType.MOMENTS_DAILY_INTERACT: "like_moment",
         }
 
         for action in actions:
@@ -332,6 +333,8 @@ class AiGodPlanner:
                         cost = int(c[1])
                     else:
                         cost = int(c)
+                elif action.action_type == ActionType.MOMENTS_DAILY_INTERACT:
+                    cost = int(action.params.get("target_count", 20))
                 if used + cost > limits[limit_key]:
                     logger.debug(
                         f"超阶段上限，丢弃 {action.action_type.value} "
@@ -348,6 +351,7 @@ class AiGodPlanner:
             ActionType.LIKE_MOMENT,
             ActionType.COMMENT_MOMENT,
             ActionType.BROWSE_MOMENTS_INTERACT,
+            ActionType.MOMENTS_DAILY_INTERACT,
             ActionType.POST_MOMENT,
             ActionType.SEND_MESSAGE,
             ActionType.SEND_IMAGE,

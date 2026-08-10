@@ -2367,7 +2367,7 @@ class SocialActions:
 
         Args:
             text: 指定评论文案；为空时 OCR 视频文案后经 comment_fn 生成
-            comment_fn: ``(video_context) -> comment``，text 为空时使用
+            comment_fn: ``(video_context, image_jpeg) -> comment``，text 为空时使用
         """
         try:
             from core.channels_browser import ChannelsBrowser
@@ -2377,16 +2377,10 @@ class SocialActions:
             time.sleep(2.0)
             body = (text or "").strip()
             if not body:
-                ctx = browser.extract_video_context()
-                if comment_fn is not None:
-                    try:
-                        body = (comment_fn(ctx) or "").strip()
-                    except Exception as e:
-                        logger.debug(f"[{self.account_id}] comment_fn 失败: {e}")
-                if not body:
-                    body = random.choice(
-                        ["不错", "学到了", "哈哈哈", "支持", "有意思", "太真实了"]
-                    )
+                body = browser._compose_comment(
+                    comment_fn,
+                    ["不错", "学到了", "哈哈哈", "支持", "有意思", "太真实了"],
+                )
             logger.info(f"[{self.account_id}] 视频号评论: {body[:20]}")
             return browser._comment_current(body)
         except Exception as e:

@@ -27,7 +27,8 @@ PERSONAS = [
         # seed_friends 可直接填写手机号/微信号列表，Day1-3 会按 1/2/2 节奏依次添加。
         "seed_friends": [],
         "seed_groups": [],
-        "industry_public_accounts": ["36氪", "极客公园", "爱范儿", "少数派", "虎嗅", "InfoQ"],
+        "moments_big_v": ["课程小助手"],
+        "industry_public_accounts": ["课程小助手", "极客公园", "爱范儿", "少数派", "虎嗅", "InfoQ"],
         "public_accounts": ["人民日报", "央视新闻", "36氪", "极客公园", "爱范儿", "少数派"],
     },
     {
@@ -180,6 +181,22 @@ def random_persona(seed: int = None) -> dict:
     """
     rng = random.Random(seed) if seed else random
     return rng.choice(PERSONAS).copy()
+
+
+def get_moments_big_v_candidates(persona: dict) -> list[str]:
+    """
+    朋友圈优先互动的大 V 名单（秒评目标）。
+
+    合并 persona.moments_big_v、public_accounts、industry_public_accounts，去重保序。
+    """
+    persona = persona or {}
+    merged: list[str] = []
+    for key in ("moments_big_v", "industry_public_accounts", "public_accounts"):
+        for name in persona.get(key, []) or []:
+            text = str(name).strip()
+            if text and text not in merged:
+                merged.append(text)
+    return merged
 
 
 def get_public_account_candidates(persona: dict, count: int | None = None) -> list[str]:

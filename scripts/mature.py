@@ -7,7 +7,10 @@
     - 适合在账号投入 benchmark 测试期间维持热度
 """
 
-from scripts.base_script import BaseScript, ActionType, Action, DailyScript, channels_daily_params
+from scripts.base_script import (
+    BaseScript, ActionType, Action, DailyScript,
+    channels_daily_params, moments_daily_params,
+)
 
 
 class MatureScript(BaseScript):
@@ -47,10 +50,9 @@ class MatureScript(BaseScript):
                 # 19:00 - 聊天 + 评论
                 Action(ActionType.SEND_MESSAGE, "18:30", "21:00", (120, 360)),
                 Action(ActionType.COMMENT_MOMENT, "19:00", "21:00", (30, 120)),
-                # 20:00 - 朋友圈 + 点赞
-                Action(ActionType.SCROLL_MOMENTS, "19:30", "21:00", (180, 480)),
-                Action(ActionType.LIKE_MOMENT, "20:00", "21:00", (30, 120),
-                       params={"count": (1, 3)}),
+                # 20:00 - 每日朋友圈互动 20 次（优先秒评大 V）
+                Action(ActionType.MOMENTS_DAILY_INTERACT, "19:30", "21:30", (600, 900),
+                       params=moments_daily_params(20)),
                 # 22:30 - 睡前
                 Action(ActionType.SCROLL_MOMENTS, "21:30", "23:00", (120, 300)),
                 # 23:00-07:00 - 不活跃

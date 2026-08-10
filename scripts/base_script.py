@@ -34,6 +34,7 @@ class ActionType(Enum):
     LIKE_MOMENT = "like_moment"
     COMMENT_MOMENT = "comment_moment"
     BROWSE_MOMENTS_INTERACT = "browse_moments_interact"
+    MOMENTS_DAILY_INTERACT = "moments_daily_interact"
     POST_MOMENT = "post_moment"
     SCROLL_CHANNELS = "scroll_channels"
     LIKE_CHANNEL = "like_channel"
@@ -82,6 +83,21 @@ def channels_daily_params(
         "finish_watch": True,
         "like_rate": like_rate,
         "comment_rate": comment_rate if comment else 0.0,
+    }
+
+
+def moments_daily_params(
+    target_count: int = 20,
+    *,
+    fresh_minutes: int = 30,
+    max_duration: int = 900,
+) -> dict:
+    """每日朋友圈互动：默认 20 次，优先秒评大 V 新帖。"""
+    return {
+        "target_count": int(target_count),
+        "prioritize_big_v": True,
+        "fresh_minutes": int(fresh_minutes),
+        "max_duration": int(max_duration),
     }
 
 
@@ -134,6 +150,7 @@ class BaseScript(ABC):
             ActionType.LIKE_MOMENT:             self._handle_like_moment,
             ActionType.COMMENT_MOMENT:          self._handle_comment_moment,
             ActionType.BROWSE_MOMENTS_INTERACT: self._handle_browse_moments_interact,
+            ActionType.MOMENTS_DAILY_INTERACT:    self._handle_moments_daily_interact,
             ActionType.POST_MOMENT:      self._handle_post_moment,
             ActionType.SCROLL_CHANNELS:  self._handle_scroll_channels,
             ActionType.LIKE_CHANNEL:     self._handle_like_channel,
@@ -390,6 +407,52 @@ class BaseScript(ABC):
         )
         return result.get("liked", 0) > 0 or result.get("commented", 0) > 0
 
+    def _handle_moments_daily_interact(self, params: dict) -> bool:
+        """每日朋友圈互动：默认 20 次，优先秒评大 V 新帖。"""
+        from content.personas import get_moments_big_v_candidates
+
+        target = int(params.get("target_count", 20))
+        fresh_minutes = int(params.get("fresh_minutes", 30))
+        max_duration = int(params.get("max_duration", 900))
+        big_v_accounts = params.get("big_v_accounts")
+        if not big_v_accounts:
+            big_v_accounts = get_moments_big_v_candidates(self.persona)
+
+        result = self.wc.moments_daily_interact(
+            target_count=target,
+            big_v_accounts=big_v_accounts,
+            comment_fn=self._moments_comment_fn(),
+            fresh_minutes=fresh_minutes,
+            max_duration=max_duration,
+        )
+        return result.get("interactions", 0) > 0
+
+    def _moments_comment_fn(self):
+        """返回 (post_content, author) -> comment；LLM 优先，模板降级。"""
+        fallback = ["不错", "学到了", "哈哈哈", "支持", "有意思", "真好看"]
+
+        def _gen(post_content: str, author: str = "") -> str:
+            ctx = (post_content or "").strip()[:200]
+            if author:
+                ctx = f"作者:{author} {ctx}".strip()
+            try:
+                from content.llm_client import LLMClient
+                text = LLMClient().generate_comment(self.persona, ctx)
+                if text:
+                    return text[:40]
+            except Exception:
+                pass
+            try:
+                from content.comment_templates import CommentTemplateManager
+                text = CommentTemplateManager().get_comment(self.persona)
+                if text:
+                    return text[:40]
+            except Exception:
+                pass
+            return self.h.choice(fallback)
+
+        return _gen
+
     def _handle_post_moment(self, params: dict) -> bool:
         """发朋友圈：Vision 智能选图 + 图文配文（可降级）"""
         text = params.get("text", "")
@@ -446,13 +509,20 @@ class BaseScript(ABC):
         return result.get("watched", 0) > 0
 
     def _channel_comment_fn(self):
-        """返回 (video_context) -> comment；LLM 失败则用人设短评兜底。"""
+        """返回 (video_context, image_jpeg) -> comment；Vision 优先，失败则 OCR+文本 LLM。"""
         fallback = ["不错", "学到了", "哈哈哈", "支持", "有意思", "太真实了"]
 
-        def _gen(video_context: str) -> str:
+        def _gen(video_context: str, image_jpeg: bytes | None = None) -> str:
             try:
                 from content.llm_client import LLMClient
-                text = LLMClient().generate_channel_comment(
+                client = LLMClient()
+                if image_jpeg and client.vision_available:
+                    text = client.generate_channel_comment_from_image(
+                        self.persona, image_jpeg, video_context or ""
+                    )
+                    if text:
+                        return text[:40]
+                text = client.generate_channel_comment(
                     self.persona, video_context or ""
                 )
                 if text:
@@ -479,7 +549,10 @@ class BaseScript(ABC):
 
         text = (params.get("text") or "").strip()
         if not text:
-            text = self._channel_comment_fn()(browser.extract_video_context())
+            text = browser._compose_comment(
+                self._channel_comment_fn(),
+                ["不错", "学到了", "哈哈哈", "支持", "有意思", "太真实了"],
+            )
         return browser._comment_current(text)
 
     def _handle_read_article(self, params: dict) -> bool:

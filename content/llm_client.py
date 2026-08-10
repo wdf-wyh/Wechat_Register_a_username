@@ -566,6 +566,74 @@ class LLMClient:
         text = self._call_api(prompt, temperature=0.85, max_tokens=80)
         return (text or "").strip().strip('"\'「」')
 
+    def generate_channel_comment_from_image(
+        self,
+        persona: dict,
+        image_jpeg: bytes,
+        video_context: str = "",
+    ) -> str:
+        """
+        根据视频号当前画面截图生成评论（Vision 优先，OCR 文本作补充）。
+
+        Args:
+            persona: 人格档案
+            image_jpeg: 视频画面 JPEG（建议裁掉右侧互动栏）
+            video_context: OCR 提取的作者/标题/简介，供模型参考
+
+        Returns:
+            评论文本（5-25字）；Vision 不可用或失败时返回空串
+        """
+        if not image_jpeg or not self.vision_available:
+            return ""
+
+        client = self._vision_client()
+        if not client:
+            return ""
+
+        ctx = (video_context or "").strip()[:280]
+        ocr_hint = (
+            f"\n补充文字（OCR，可能不完整或有误）：「{ctx}」"
+            if ctx
+            else ""
+        )
+        prompt = f"""这是一张微信视频号播放页截图（已裁掉右侧点赞/评论按钮栏）。
+请先看画面和字幕/简介，再写一条你要发的评论。{ocr_hint}
+
+你的个人画像：
+- 年龄：{persona.get('age', '25-35')}
+- 兴趣：{', '.join(persona.get('hobbies', ['日常']))}
+- 评论风格：{persona.get('comment_style', '简洁真诚')}
+
+请写一条视频号评论（5-25字）。
+要求：
+- 简短自然，像随手敲的，不要官话
+- 贴合画面/字幕主题，但不要复述整段文案
+- 看不清内容时，只发情绪向泛评（如「哈哈哈」「牛」），不要编造具体事实
+- 不要用话题标签，少用或不用 emoji
+- 只输出评论正文，不要引号或解释
+"""
+        b64 = base64.b64encode(image_jpeg).decode("ascii")
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
+                    },
+                    {"type": "text", "text": prompt},
+                ],
+            }
+        ]
+        raw = self._call_api_vision(
+            messages,
+            model=self._vision_model(),
+            temperature=0.55,
+            max_tokens=80,
+            client=client,
+        )
+        return (raw or "").strip().strip('"\'「」')
+
     def generate_article_comment(
         self,
         persona: dict,
