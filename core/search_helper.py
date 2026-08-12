@@ -5,7 +5,7 @@
   1. 冷启动微信 → 确保在"微信"Tab
   2. 点击右上角搜索图标（放大镜，紧挨"+"按钮）
   3. 验证搜索页打开（页面差异对比）
-  4. ADBKeyboard IME 注入关键词 → Enter 搜索
+  4. ADBKeyboard IME 注入关键词 → 键盘右下角绿色「搜索」（失败再 Enter）
 
 使用方式:
     from core.search_helper import SearchHelper
@@ -130,10 +130,91 @@ class SearchHelper:
                 pass
 
     def _press_search(self):
-        """按 Enter 键触发搜索。"""
-        time.sleep(0.3)
+        """优先点键盘右下角绿色「搜索」，失败再 Enter / OCR。"""
+        time.sleep(0.35)
+        if self._click_keyboard_search_green():
+            time.sleep(2.0)
+            return
         try:
             self.d.press("enter")
-            time.sleep(2)
+            time.sleep(2.0)
+            return
         except Exception:
             pass
+        # OCR 兜底：键盘区「搜索」
+        try:
+            from core.wechat_nav import ocr_find_and_click
+            from utils.ocr_utils import create_easyocr_reader
+
+            reader = create_easyocr_reader()
+            if ocr_find_and_click(
+                self.d,
+                reader,
+                ["搜索"],
+                y_min_ratio=0.78,
+                y_max_ratio=0.99,
+                x_min_ratio=0.55,
+                x_max_ratio=1.0,
+                conf_min=0.30,
+                exact=True,
+                post_click_sleep=1.5,
+            ):
+                time.sleep(0.5)
+                return
+        except Exception as e:
+            logger.debug(f"[{self.account_id}] OCR 点键盘搜索失败: {e}")
+        # 坐标兜底：键盘右下角
+        try:
+            self.d.click(int(self.w * 0.90), int(self.h * 0.94))
+            time.sleep(2.0)
+        except Exception:
+            pass
+
+    def _click_keyboard_search_green(self) -> bool:
+        """点击软键盘右下角绿色搜索键。"""
+        try:
+            shot = self.d.screenshot(format="opencv")
+            if shot is None:
+                return False
+            h, w = shot.shape[:2]
+            hsv = cv2.cvtColor(shot, cv2.COLOR_BGR2HSV)
+            mask = cv2.inRange(
+                hsv, np.array([35, 60, 60]), np.array([95, 255, 255])
+            )
+            # 键盘区右下角
+            y0, y1 = int(h * 0.78), int(h * 0.995)
+            x0 = int(w * 0.62)
+            mask[:y0, :] = 0
+            mask[y1:, :] = 0
+            mask[:, :x0] = 0
+            contours, _ = cv2.findContours(
+                mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            )
+            best = None  # (score, cx, cy)  偏右下优先
+            min_area = w * h * 0.0003
+            max_area = w * h * 0.06
+            for c in contours:
+                x, y, bw, bh = cv2.boundingRect(c)
+                area = bw * bh
+                if area < min_area or area > max_area:
+                    continue
+                if bw < 20 or bh < 16:
+                    continue
+                if bw > w * 0.45 or bh > h * 0.14:
+                    continue
+                cx, cy = x + bw // 2, y + bh // 2
+                # 越靠右下越好
+                score = (cx / w) * 2.0 + (cy / h)
+                if best is None or score > best[0]:
+                    best = (score, cx, cy)
+            if best is None:
+                return False
+            _, cx, cy = best
+            self.d.click(int(cx), int(cy))
+            logger.info(
+                f"[{self.account_id}] 键盘绿钮搜索 @({cx / w:.3f},{cy / h:.3f})"
+            )
+            return True
+        except Exception as e:
+            logger.debug(f"[{self.account_id}] 键盘绿钮检测失败: {e}")
+            return False

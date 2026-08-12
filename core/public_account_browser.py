@@ -13,6 +13,8 @@
 
     会话列表点「公众号」→ 失败则通讯录「公众号」→ 再失败则全局搜索
       │
+      ├─ 简略订阅流 → 点「更多消息」进入单号完整文章列表
+      │
       ├─ 浏览文章列表 (随机上下滚动)
       │
       ├─ OCR 找文章标题 → 随机选一篇 → 点击进入
@@ -44,6 +46,7 @@
 import time
 import random
 import re
+import os
 import cv2
 import numpy as np
 
@@ -71,6 +74,14 @@ class PublicAccountBrowser:
         self._clahe = None
         # 本轮 browse 内已读标题指纹，避免重复点开同一篇
         self._read_title_keys: set[str] = set()
+        # 本轮 browse 内“打开失败/标题不匹配”的标题指纹，
+        # 用于列表不刷新的情况下避免反复点同一批条目。
+        self._failed_title_keys: set[str] = set()
+        # 本轮 browse 是否已尝试进入单号完整文章列表（避免每次回列表都重复探测）
+        self._full_list_probed = False
+        # 最近一次 browse 统计（供剧本 handler 判成败）
+        self.last_articles_read = 0
+        self.last_comments_sent = 0
 
     # ================================================================
     # 公共接口
@@ -82,6 +93,7 @@ class PublicAccountBrowser:
         comment_rate: float = 0.15,
         post_after_read: bool = False,
         post_rate: float = 0.0,
+        stop_after_comments: int | None = None,
     ) -> int:
         """
         浏览公众号文章，持续指定时长。
@@ -89,32 +101,54 @@ class PublicAccountBrowser:
         Args:
             duration_seconds: 浏览总时长（秒）
             comment_rate: 写评论概率（每篇文章进入后尝试一次）
+            stop_after_comments: 成功留言达到该数后不再评论（仍可读）；
+                Day1/smoke 目标常为 1，避免后续无留言入口文章拖垮成功率观感
 
         Returns:
             阅读文章篇数
         """
-        logger.info(f"[{self.account_id}] 公众号浏览: {duration_seconds}s")
+        logger.info(
+            f"[{self.account_id}] 公众号浏览: {duration_seconds}s "
+            f"comment_rate={comment_rate} stop_after_comments={stop_after_comments}"
+        )
         articles_read = 0
         self._read_title_keys.clear()
+        self._failed_title_keys.clear()
+        self._full_list_probed = False
+        self.last_articles_read = 0
+        self.last_comments_sent = 0
 
         try:
             self._open_public_accounts()
+            # 进入公众号列表后，优先主动探测一次「更多消息」入口
+            self._full_list_probed = self._enter_full_article_list_from_summary()
 
             start = time.time()
             while time.time() - start < duration_seconds:
+                rate = float(comment_rate)
+                if (
+                    stop_after_comments is not None
+                    and self.last_comments_sent >= int(stop_after_comments)
+                ):
+                    rate = 0.0
                 if random.random() < 0.4:
                     self._scroll_list()
                 else:
                     if self._read_article(
-                        comment_rate=comment_rate,
+                        comment_rate=rate,
                         post_after_read=post_after_read,
                         post_rate=post_rate,
                     ):
                         articles_read += 1
 
-            logger.info(f"[{self.account_id}] 公众号完成: {articles_read}篇")
+            self.last_articles_read = articles_read
+            logger.info(
+                f"[{self.account_id}] 公众号完成: {articles_read}篇 "
+                f"留言成功={self.last_comments_sent}"
+            )
         except Exception as e:
             logger.error(f"[{self.account_id}] 公众号异常: {e}")
+            self.last_articles_read = articles_read
 
         return articles_read
 
@@ -236,6 +270,11 @@ class PublicAccountBrowser:
 
     def _looks_like_pa_feed(self) -> bool:
         """粗判已进入公众号订阅流 / 账号列表（已离开会话主列表）。"""
+        if self._is_wechat_chat_list():
+            return False
+        if self._is_service_account_chat():
+            return False
+
         blob = self._ocr_screen_blob(0.0, 0.35)
         # 仍在会话主列表：常见系统会话
         chat_markers = ("服务通知", "腾讯新闻", "微信支付", "微信团队")
@@ -246,9 +285,45 @@ class PublicAccountBrowser:
         # 订阅流 / 公众号相关顶栏或列表特征
         if any(k in blob for k in ("公众号", "已关注", "历史消息", "消息列表")):
             return True
-        # 离开会话主列表后顶栏通常不再是「微信(N)」
-        if "微信(" not in blob and "服务通知" not in blob:
+        # 多条时间戳的卡片列表（订阅流），且不是单聊会话
+        mid = self._ocr_screen_blob(0.10, 0.88)
+        time_hits = sum(
+            1
+            for token in re.split(r"\s+", mid)
+            if self._is_feed_timestamp(self._normalize_ocr_text(token))
+        )
+        if time_hits >= 2 and "发消息" not in blob:
             return True
+        return False
+
+    def _is_wechat_chat_list(self) -> bool:
+        """是否仍在微信 Tab 会话列表首页（非公众号订阅流）。"""
+        top = self._ocr_screen_blob(0.0, 0.22)
+        if "微信(" in top or "微信（" in top:
+            return True
+        bottom = self._ocr_screen_blob(0.88, 1.0)
+        if sum(1 for k in ("微信", "通讯录", "发现", "我") if k in bottom) >= 3:
+            if "微信(" in top or any(
+                k in top for k in ("服务通知", "腾讯新闻", "文件传输助手")
+            ):
+                return True
+        return False
+
+    def _is_service_account_chat(self) -> bool:
+        """是否误入单个服务号会话（如澎湃新闻），不是公众号文件夹订阅流。"""
+        top = self._ocr_screen_blob(0.0, 0.22)
+        if "服务号" in top:
+            return True
+        # 服务号会话顶栏：账号名 + 下方消息气泡时间，无「消息列表/历史消息」
+        if "发消息" in top and "历史消息" not in top and "消息列表" not in top:
+            mid = self._ocr_screen_blob(0.15, 0.75)
+            if "公众号" not in mid and "消息列表" not in mid:
+                if sum(
+                    1
+                    for token in re.split(r"\s+", mid)
+                    if self._is_feed_timestamp(self._normalize_ocr_text(token))
+                ) >= 1:
+                    return True
         return False
 
     def _open_via_global_search(self):
@@ -353,10 +428,30 @@ class PublicAccountBrowser:
                 return True
         return False
 
+    def _title_open_failed(self, title: str) -> bool:
+        """本轮内“打开失败/标题不匹配”的短期去重。"""
+        key = self._title_fingerprint(title)
+        if not key:
+            return False
+        if key in self._failed_title_keys:
+            return True
+        for seen in self._failed_title_keys:
+            if key in seen or seen in key:
+                return True
+            if self._title_match_score(key, seen) >= 0.7:
+                return True
+        return False
+
     def _mark_title_read(self, title: str):
         key = self._title_fingerprint(title)
         if key:
             self._read_title_keys.add(key[:48])
+
+    def _mark_title_open_failed(self, title: str):
+        """把“本轮内点开失败/标题不匹配”的标题短期记入失败去重。"""
+        key = self._title_fingerprint(title)
+        if key:
+            self._failed_title_keys.add(key[:48])
 
     def _scan_feed_article_candidates(self) -> list[tuple[int, int, str, int]]:
         """OCR 订阅流，返回 (cx, cy, title, len) 候选，已读标题已过滤。"""
@@ -388,14 +483,197 @@ class PublicAccountBrowser:
                 continue
             if self._title_already_read(cleaned):
                 continue
+            if self._title_open_failed(cleaned):
+                continue
             articles.append((cx, cy, cleaned, len(cleaned)))
 
         articles.sort(key=lambda item: item[3], reverse=True)
         return articles
 
+    def _is_pa_aggregated_summary_feed(self) -> bool:
+        """
+        公众号混合订阅流：各号仅展示少量文章，常见「更多消息」「订阅精选」。
+        此页文章数量有限，长时阅读应先点「更多消息」进单号完整列表。
+        """
+        top = self._ocr_screen_blob(0.0, 0.18)
+        if "公众号" not in top:
+            return False
+        mid = self._ocr_screen_blob(0.10, 0.88)
+        return any(k in mid for k in ("更多消息", "订阅精选"))
+
+    def _is_account_profile_home(self) -> bool:
+        """误入单个公众号主页（可关注/发消息），不是可点选文章的列表。"""
+        top = self._ocr_screen_blob(0.0, 0.30)
+        if any(k in top for k in ("发消息", "音视频通话")):
+            return True
+        if "视频号" in top and "服务" in top:
+            return True
+        return False
+
+    def _is_account_article_list(self) -> bool:
+        """单个公众号的完整文章列表（点「更多消息」后的历史消息页）。"""
+        if self._is_account_profile_home() or self._is_pa_aggregated_summary_feed():
+            return False
+        top = self._ocr_screen_blob(0.0, 0.22)
+        mid = self._ocr_screen_blob(0.12, 0.88)
+        if any(k in top for k in ("历史消息", "消息列表")):
+            return True
+        time_hits = sum(
+            1
+            for token in re.split(r"\s+", mid)
+            if self._is_feed_timestamp(self._normalize_ocr_text(token))
+        )
+        if time_hits >= 3 and not any(
+            k in mid for k in ("说点什么", "写留言", "写评论", "阅读原文", "在看")
+        ):
+            return True
+        return False
+
+    @staticmethod
+    def _is_more_messages_label(text: str) -> bool:
+        """OCR 文本是否为「更多消息」入口（短标签），排除长标题误匹配。"""
+        t = re.sub(r"\s+", "", (text or "").strip())
+        if not t or len(t) > 18 or "更多消息" not in t:
+            return False
+        rest = re.sub(r"更多消息", "", t)
+        rest = re.sub(r"[>›》）)）\s]+", "", rest)
+        return len(rest) <= 4
+
+    def _ocr_click_more_messages(self) -> bool:
+        """严格 OCR 定位并点击「更多消息」，避免误点文章标题。"""
+        d, w, h = self.d, self.w, self.h
+        img = np.array(d.screenshot(format="pillow"))
+        gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+        results = self._get_ocr().readtext(
+            cv2.cvtColor(self._enhance(gray), cv2.COLOR_GRAY2BGR)
+        )
+
+        best: tuple[tuple[int, float, int], int, int, str] | None = None
+        for bbox, text, conf in results:
+            if conf < 0.34:
+                continue
+            cleaned = self._normalize_ocr_text(text)
+            if not self._is_more_messages_label(cleaned):
+                continue
+            y0 = int(bbox[0][1])
+            cy = int((bbox[0][1] + bbox[2][1]) / 2)
+            cx = int((bbox[0][0] + bbox[2][0]) / 2)
+            if not (int(h * 0.12) < y0 < int(h * 0.86)):
+                continue
+            if cx < int(w * 0.08) or cx > int(w * 0.92):
+                continue
+            # 越短越像按钮文案；同长度取置信度更高、更靠下的
+            score = (len(cleaned), -float(conf), -cy)
+            if best is None or score < best[0]:
+                best = (score, cx, cy, cleaned)
+
+        if best is None:
+            return False
+
+        _, cx, cy, label = best
+        logger.info(
+            f"[{self.account_id}] OCR 命中「更多消息」: '{label}' @({cx},{cy})"
+        )
+        d.click(cx, cy)
+        time.sleep(1.4)
+        return True
+
+    def _enter_full_article_list_from_summary(self) -> bool:
+        """从公众号文章列表页下滑并严格点击「更多消息」，进入单号完整文章列表。"""
+        if self._is_account_article_list():
+            return True
+        if (
+            self._is_wechat_chat_list()
+            or self._is_service_account_chat()
+            or self._looks_like_article_page()
+            or self._is_account_profile_home()
+        ):
+            return False
+
+        d, w, h = self.d, self.w, self.h
+        debug_enabled = os.environ.get("PA_MORE_MESSAGES_DEBUG", "").strip() == "1"
+
+        def _debug_dump(attempt_idx: int):
+            if not debug_enabled:
+                return
+            try:
+                out_dir = os.path.abspath(
+                    os.path.join(os.path.dirname(__file__), "..", "logs")
+                )
+                os.makedirs(out_dir, exist_ok=True)
+                img_path = os.path.join(
+                    out_dir, f"pa_more_messages_debug_{self.account_id}_a{attempt_idx}.png"
+                )
+                json_path = os.path.join(
+                    out_dir, f"pa_more_messages_debug_{self.account_id}_a{attempt_idx}.json"
+                )
+                img = d.screenshot(format="pillow")
+                img.save(img_path)
+                with open(json_path, "w", encoding="utf-8") as f:
+                    f.write(self._ocr_screen_blob(0.0, 1.0))
+                logger.warning(
+                    f"[{self.account_id}] PA 更多消息调试：已保存 a={attempt_idx} 截图与 OCR"
+                )
+            except Exception as e:
+                logger.debug(f"[{self.account_id}] PA 更多消息调试 dump 失败: {e}")
+
+        logger.info(f"[{self.account_id}] 先下滑并 OCR 查找「更多消息」入口")
+        for attempt in range(1, 5):
+            # 第 1 轮先扫当前屏；未命中再下滑
+            if attempt > 1:
+                try:
+                    d.swipe(
+                        int(w * 0.50),
+                        int(h * 0.78),
+                        int(w * 0.50),
+                        int(h * 0.34),
+                        duration=0.45,
+                    )
+                except Exception:
+                    pass
+                time.sleep(0.55)
+
+            _debug_dump(attempt)
+            clicked = self._ocr_click_more_messages()
+            if not clicked:
+                logger.debug(
+                    f"[{self.account_id}] 第 {attempt}/4 轮未 OCR 到「更多消息」，继续下滑"
+                )
+                continue
+
+            time.sleep(0.35)
+            if self._looks_like_article_page():
+                logger.warning(
+                    f"[{self.account_id}] 误点进文章正文，返回后继续找「更多消息」"
+                )
+                d.press("back")
+                time.sleep(0.8)
+                continue
+            if self._is_account_profile_home():
+                logger.warning(
+                    f"[{self.account_id}] 误点进公众号主页，返回后继续找「更多消息」"
+                )
+                d.press("back")
+                time.sleep(0.8)
+                continue
+            if self._is_account_article_list():
+                logger.info(f"[{self.account_id}] 已进入单号完整文章列表")
+                return True
+
+            logger.debug(
+                f"[{self.account_id}] 已点「更多消息」但未进完整列表，重试 {attempt}/4"
+            )
+            d.press("back")
+            time.sleep(0.7)
+
+        logger.warning(
+            f"[{self.account_id}] 未能进入完整文章列表，继续在简略流阅读"
+        )
+        return False
+
     def _looks_like_article_page(self) -> bool:
         """强特征：底栏留言/分享等（用于确认仍在正文、需要返回）。"""
-        if self._is_public_account_home_or_history():
+        if self._is_account_profile_home():
             return False
         bottom = self._ocr_screen_blob(0.72, 1.0)
         if any(
@@ -407,10 +685,17 @@ class PublicAccountBrowser:
 
     def _is_on_article_feed(self) -> bool:
         """是否仍在订阅流/历史列表（未进入单篇正文）。"""
-        if self._is_public_account_home_or_history():
+        if self._is_wechat_chat_list() or self._is_service_account_chat():
+            return False
+        if self._is_account_profile_home():
+            return False
+        if self._is_pa_aggregated_summary_feed() or self._is_account_article_list():
             return True
         if self._looks_like_article_page():
             return False
+        top = self._ocr_screen_blob(0.0, 0.18)
+        if any(k in top for k in ("公众号", "消息列表", "历史消息")):
+            return True
         mid = self._ocr_screen_blob(0.12, 0.85)
         time_hits = 0
         for token in re.split(r"\s+", mid):
@@ -444,6 +729,29 @@ class PublicAccountBrowser:
                 d.press("back")
                 time.sleep(0.6)
                 continue
+            if self._is_service_account_chat():
+                logger.info(f"[{self.account_id}] 误入服务号会话，返回")
+                d.press("back")
+                time.sleep(0.8)
+                continue
+            if self._is_wechat_chat_list():
+                logger.info(
+                    f"[{self.account_id}] 已回到微信会话列表，重新进入公众号"
+                )
+                self._open_public_accounts()
+                time.sleep(0.8)
+                if self._is_on_article_feed():
+                    return True
+                continue
+            if self._is_pa_aggregated_summary_feed():
+                self._enter_full_article_list_from_summary()
+                if self._is_on_article_feed():
+                    return True
+            if (not self._full_list_probed) and self._is_on_article_feed():
+                self._enter_full_article_list_from_summary()
+                self._full_list_probed = True
+                if self._is_on_article_feed():
+                    return True
             if self._is_on_article_feed():
                 return True
             if self._looks_like_article_page():
@@ -456,8 +764,16 @@ class PublicAccountBrowser:
                 d.press("back")
                 time.sleep(1.0)
                 continue
-            return True
-        ok = self._is_on_article_feed() or not self._looks_like_article_page()
+            # 无法判定：尝试 back 一次，勿默认成功
+            d.press("back")
+            time.sleep(0.8)
+
+        if self._is_wechat_chat_list() or self._is_service_account_chat():
+            logger.info(f"[{self.account_id}] 未能留在订阅流，重新进入公众号")
+            self._open_public_accounts()
+            time.sleep(0.8)
+
+        ok = self._is_on_article_feed() and not self._is_wechat_chat_list()
         if not ok:
             logger.warning(f"[{self.account_id}] 未能回到公众号文章列表")
         return ok
@@ -477,20 +793,23 @@ class PublicAccountBrowser:
             logger.warning(f"[{self.account_id}] 打开文章后出现异常浮层")
             d.press("back")
             time.sleep(0.8)
+            self._mark_title_open_failed(title)
             return False
 
-        if self._is_public_account_home_or_history():
+        if self._is_account_profile_home():
             logger.warning(
-                f"[{self.account_id}] 误入公众号主页/历史列表(非文章正文)，返回重试"
+                f"[{self.account_id}] 误入公众号主页(非文章列表/正文)，返回重试"
             )
             d.press("back")
             time.sleep(1.0)
+            self._mark_title_open_failed(title)
             return False
 
         if self._is_on_article_feed():
             logger.warning(
                 f"[{self.account_id}] 点击后仍在文章列表，未打开: '{title[:20]}'"
             )
+            self._mark_title_open_failed(title)
             return False
 
         after_sig = self._feed_content_signature()
@@ -498,12 +817,14 @@ class PublicAccountBrowser:
             logger.warning(
                 f"[{self.account_id}] 点击后页面无变化，未打开: '{title[:20]}'"
             )
+            self._mark_title_open_failed(title)
             return False
 
         if not self._page_matches_title(title):
             logger.warning(
                 f"[{self.account_id}] 打开后标题不匹配(仍可能是上一篇): '{title[:20]}'"
             )
+            self._mark_title_open_failed(title)
             d.press("back")
             time.sleep(1.0)
             self._ensure_on_feed_list(max_backs=2)
@@ -549,6 +870,8 @@ class PublicAccountBrowser:
             self._scroll_list()
             return False
 
+        # 文章确认打开后立即记入已读，确保后续阅读/评论/滑动即便抛异常也不会再重复点击同一篇
+        self._mark_title_read(title)
         logger.debug(f"[{self.account_id}] 阅读: '{title[:20]}'")
 
         # 先完整模拟阅读；需要评论/发圈时读完后再滚到文末。
@@ -573,17 +896,19 @@ class PublicAccountBrowser:
                 )
                 self._dismiss_image_viewer_if_any()
                 if not self._is_comment_entry_visible():
+                    # 评论前必须滚到留言区；适当加大上限，pause 缩短加快找底
                     self._scroll_to_article_bottom(
-                        max_scrolls=6,
+                        max_scrolls=18,
                         min_scrolls=2,
-                        pause_range=(1.2, 2.8),
+                        pause_range=(0.8, 1.8),
                     )
                 commented = self._comment_article(
                     title=title,
                     article_context=article_context,
                     prepared_text=pending_comment,
                 )
-                if not commented:
+                if not commented and self._is_comment_entry_visible():
+                    # 有入口才同页再试；无「写留言」的文章再试只会刷失败日志
                     time.sleep(0.4)
                     self._dismiss_image_viewer_if_any()
                     commented = self._comment_article(
@@ -592,6 +917,9 @@ class PublicAccountBrowser:
                         prepared_text=pending_comment,
                     )
                 if commented:
+                    self.last_comments_sent = int(
+                        getattr(self, "last_comments_sent", 0)
+                    ) + 1
                     logger.info(f"[{self.account_id}] 公众号评论发送成功")
                 else:
                     logger.warning(f"[{self.account_id}] 公众号评论发送失败")
@@ -610,7 +938,6 @@ class PublicAccountBrowser:
             except Exception as e:
                 logger.exception(f"[{self.account_id}] 文章读后发圈链路异常: {e}")
 
-        self._mark_title_read(title)
         self._ensure_on_feed_list(max_backs=3)
         return True
 
@@ -986,6 +1313,7 @@ class PublicAccountBrowser:
         logger.info(f"[{self.account_id}] 公众号评论尝试: {text[:18]}")
 
         self._dismiss_image_viewer_if_any()
+        self._dismiss_stale_comment_ime()
 
         # 0) 评论前确保已滚到文末留言区（调用方应已先完成阅读，此处仅兜底）
         if not self._is_comment_entry_visible():
@@ -1118,8 +1446,8 @@ class PublicAccountBrowser:
                     except Exception:
                         pass
                     time.sleep(0.25)
-                    # WebView 常读不到 info.text：结合 OCR /「发送」再判断，避免重复写入
-                    if self._comment_input_looks_filled(text, edit=best_edit):
+                    # WebView 常读不到 info.text：OCR 或绿钮（与 smoke 一致）确认
+                    if self._comment_write_confirmed(text, edit=best_edit):
                         text_written = True
 
             if not text_written:
@@ -1183,10 +1511,34 @@ class PublicAccountBrowser:
             return False
 
         if not text_written:
+            # 与 smoke 一致：绿钮已亮则直接发送，不因 OCR 读不到草稿而放弃
+            if self._green_send_visible():
+                logger.info(
+                    f"[{self.account_id}] OCR未读到草稿但绿钮可见，按 smoke 路径发送"
+                )
+                text_written = True
+            else:
+                # 再聚焦写一次
+                try:
+                    self._dismiss_image_viewer_if_any()
+                    self._focus_comment_compose()
+                    text_written = self._type_comment_via_ime(text)
+                    if not text_written and self._green_send_visible():
+                        text_written = True
+                except Exception:
+                    text_written = False
+
+        if not text_written:
             logger.warning(f"[{self.account_id}] 评论文本未写入成功，放弃发送")
+            try:
+                if self._is_soft_keyboard_open():
+                    d.press("back")
+                    time.sleep(0.3)
+            except Exception:
+                pass
             return False
 
-        # 3) 写入成功后优先点绿色「发送」，再 OCR/u2/坐标兜底
+        # 3) 写入成功后优先点绿色「发送」（与 public_account_comment_smoke 同路径）
         try:
             send_triggered, sent = self._click_pa_comment_send(
                 text, best_right=best_right, best_center_y=best_center_y
@@ -1233,29 +1585,143 @@ class PublicAccountBrowser:
         )
         return ok
 
+    def _green_send_visible(self) -> bool:
+        """
+        留言框右侧微信绿「发送」是否可见。
+        绿钮出现通常意味着正文已入框（灰→绿）；与 smoke 成功发送同判据。
+        """
+        keyboard_up = self._is_soft_keyboard_open()
+        ranges = (
+            [(0.45, 0.82), (0.40, 0.85)]
+            if keyboard_up
+            else [(0.68, 0.96), (0.72, 0.92)]
+        )
+        for y0, y1 in ranges:
+            if self._find_pa_comment_send_green(y0, y1):
+                return True
+        return bool(self._find_pa_comment_send_green(0.45, 0.99, x_min=0.50))
+
+    def _focus_comment_compose(self) -> None:
+        """把焦点落到留言输入框，避免粘贴打到错误控件。"""
+        from core.wechat_nav import ocr_find_and_click
+
+        d, w, h = self.d, self.w, self.h
+        # 1) 下半屏 EditText
+        try:
+            edits = d(className="android.widget.EditText")
+            best = None
+            best_bottom = -1
+            if edits.exists and edits.count >= 1:
+                for e in edits:
+                    try:
+                        info = getattr(e, "info", {}) or {}
+                        bounds = info.get("bounds")
+                        bottom = None
+                        if bounds:
+                            nums = list(map(int, re.findall(r"\d+", str(bounds))))
+                            if len(nums) >= 4:
+                                if nums[3] < int(h * 0.40):
+                                    continue
+                                bottom = nums[3]
+                        if bottom is None:
+                            cy = int(e.center()[1])
+                            if cy < int(h * 0.40):
+                                continue
+                            bottom = cy
+                        if bottom > best_bottom:
+                            best_bottom = bottom
+                            best = e
+                    except Exception:
+                        continue
+            if best is not None:
+                try:
+                    best.click()
+                except Exception:
+                    pass
+                self._arm_comment_ime()
+                time.sleep(0.2)
+                return
+        except Exception:
+            pass
+
+        # 2) OCR 入口
+        try:
+            y_max = 0.78 if self._is_soft_keyboard_open() else 0.92
+            if ocr_find_and_click(
+                d,
+                self._get_ocr(),
+                ["写留言", "写评论", "说点什么", "发表评论"],
+                y_min_ratio=0.50,
+                y_max_ratio=y_max,
+                x_min_ratio=0.05,
+                x_max_ratio=0.72,
+                conf_min=0.28,
+                enhance=self._enhance,
+                exact=False,
+                click_x_bias=-0.25,
+                post_click_sleep=0.45,
+            ):
+                self._arm_comment_ime()
+                return
+        except Exception:
+            pass
+
+        # 3) 键盘未开时点偏上输入条；键盘已开绝不点底部
+        if not self._is_soft_keyboard_open():
+            try:
+                d.click(int(w * 0.32), int(h * 0.78))
+                time.sleep(0.35)
+            except Exception:
+                pass
+        self._arm_comment_ime()
+
+    def _comment_write_confirmed(self, draft_text: str, edit=None) -> bool:
+        """写入确认：EditText/OCR 草稿，或与 smoke 一致的绿钮可见。"""
+        if self._comment_input_looks_filled(draft_text, edit=edit):
+            return True
+        if self._green_send_visible():
+            logger.debug(
+                f"[{self.account_id}] 留言绿钮可见，视为正文已写入"
+            )
+            return True
+        return False
+
+    def _dismiss_stale_comment_ime(self) -> None:
+        """收起上一篇残留键盘/半开输入态，避免第二篇粘贴落空。"""
+        d = self.d
+        try:
+            if self._is_soft_keyboard_open() and not self._is_comment_entry_visible():
+                d.press("back")
+                time.sleep(0.35)
+                self._dismiss_image_viewer_if_any()
+        except Exception:
+            pass
+
     def _type_comment_via_ime(self, text: str) -> bool:
         """
-        通过剪贴板粘贴 / send_keys 写入评论，并用 OCR 校验是否出现在输入区。
-        WebView 留言框常无可靠 EditText.info.text。
+        通过剪贴板粘贴 / send_keys 写入评论，并用 OCR/绿钮校验。
+        WebView 留言框常无可靠 EditText.info.text；smoke 成功路径最终靠绿钮发送。
         """
         t = self._sanitize_comment_text(text)
         if not t:
             return False
         d = self.d
+        self._focus_comment_compose()
         # 写入前清空，避免残留误触「，，」再叠正文
         self._clear_comment_input()
         # 1) 剪贴板粘贴（少改输入法状态）
         try:
             d.set_clipboard(t)
-            time.sleep(0.1)
+            time.sleep(0.12)
             d.shell("input keyevent 279")  # PASTE
-            time.sleep(0.45)
-            if self._comment_input_looks_filled(t):
+            time.sleep(0.55)
+            if self._comment_write_confirmed(t):
                 return True
         except Exception:
             pass
-        # 2) send_keys（仅粘贴未确认成功时才写入；先清空，避免粘贴已生效时叠写）
+        # 2) 再聚焦后 send_keys（仅粘贴未确认成功时）
         try:
+            self._focus_comment_compose()
             self._clear_comment_input()
             try:
                 d.set_input_ime(True)
@@ -1263,14 +1729,14 @@ class PublicAccountBrowser:
                 pass
             time.sleep(0.15)
             d.send_keys(t)
-            time.sleep(0.35)
+            time.sleep(0.45)
             try:
                 d.set_input_ime(False)
             except Exception:
                 pass
         except Exception:
-            return False
-        return self._comment_input_looks_filled(t)
+            return self._green_send_visible()
+        return self._comment_write_confirmed(t)
 
     def _comment_input_looks_filled(self, draft_text: str, edit=None) -> bool:
         """
@@ -1374,13 +1840,42 @@ class PublicAccountBrowser:
         return self._ocr_comment_draft_visible(text)
 
     def _scroll_list(self):
-        """随机上下滚动文章列表。"""
-        if random.random() < 0.5:
-            self.d.swipe(self.w // 2, int(self.h * 0.6),
-                          self.w // 2, int(self.h * 0.34), duration=0.45)
+        """
+        滚动文章列表。
+
+        你的反馈里「更多消息 / 历史消息」页通常不支持下拉刷新，
+        只能用“向上滑动”持续向旧内容翻；因此完整列表阶段只用上滑，
+        避免把列表拉回已看区域导致反复点击。
+        """
+        up_only = self._full_list_probed or self._is_account_article_list()
+
+        # swipe 起点在下方、终点在上方 => 手指上滑，内容向下翻
+        if up_only:
+            self.d.swipe(
+                self.w // 2,
+                int(self.h * 0.60),
+                self.w // 2,
+                int(self.h * 0.34),
+                duration=0.45,
+            )
         else:
-            self.d.swipe(self.w // 2, int(self.h * 0.3),
-                          self.w // 2, int(self.h * 0.62), duration=0.50)
+            if random.random() < 0.5:
+                self.d.swipe(
+                    self.w // 2,
+                    int(self.h * 0.60),
+                    self.w // 2,
+                    int(self.h * 0.34),
+                    duration=0.45,
+                )
+            else:
+                # swipe 起点在上方、终点在下方 => 手指下滑，内容向上回翻
+                self.d.swipe(
+                    self.w // 2,
+                    int(self.h * 0.30),
+                    self.w // 2,
+                    int(self.h * 0.62),
+                    duration=0.50,
+                )
         time.sleep(random.uniform(1.2, 2.8))
 
     def _ensure_search_page(self, open_search_fn) -> bool:
@@ -1582,30 +2077,10 @@ class PublicAccountBrowser:
 
     def _is_public_account_home_or_history(self) -> bool:
         """
-        判断当前是否误入公众号主页 / 账号历史消息列表（而非单篇正文）。
-
-        注意：文章页顶栏也可能出现「已关注」，不能单凭它判定。
+        兼容旧调用：公众号主页，或单号完整文章列表。
+        长时阅读应使用完整列表（_is_account_article_list），而非简略混合流。
         """
-        top = self._ocr_screen_blob(0.0, 0.30)
-        mid = self._ocr_screen_blob(0.18, 0.75)
-        # 主页强特征（文章页一般没有）
-        if any(k in top for k in ("发消息", "音视频通话")):
-            return True
-        if "视频号" in top and "服务" in top:
-            return True
-        if "历史消息" in top or "历史消息" in mid:
-            return True
-
-        # 历史/订阅列表：多条相对时间并存，且看不到正文留言特征
-        time_hits = 0
-        for token in re.split(r"\s+", mid):
-            if self._is_feed_timestamp(self._normalize_ocr_text(token)):
-                time_hits += 1
-        if time_hits >= 3 and not any(
-            k in mid for k in ("说点什么", "写留言", "写评论", "阅读原文", "在看")
-        ):
-            return True
-        return False
+        return self._is_account_profile_home() or self._is_account_article_list()
 
     def _capture_article_context(self, title: str) -> str:
         """抓取文章页可见正文摘要，供评论/发圈生成使用。"""
@@ -1662,15 +2137,25 @@ class PublicAccountBrowser:
 
         for idx in range(total_scrolls):
             self._article_read_scroll_once(w, h)
+            # 评论链路：一旦 OCR 识别到留言区特征，就立刻停止继续滑动
+            if scroll_to_bottom and self._is_article_bottom_visible():
+                logger.debug(
+                    f"[{self.account_id}] 已识别留言入口(留言/写留言) — 停止继续滑动"
+                )
+                break
+
             time.sleep(random.uniform(2.4, 5.5))
             if idx < total_scrolls - 1 and random.random() < 0.18:
-                self.d.swipe(
-                    int(w * random.uniform(0.48, 0.54)),
-                    int(h * random.uniform(0.40, 0.48)),
-                    int(w * random.uniform(0.48, 0.54)),
-                    int(h * random.uniform(0.52, 0.62)),
-                    duration=random.uniform(0.35, 0.65),
-                )
+                try:
+                    self.d.swipe(
+                        int(w * random.uniform(0.48, 0.54)),
+                        int(h * random.uniform(0.40, 0.48)),
+                        int(w * random.uniform(0.48, 0.54)),
+                        int(h * random.uniform(0.52, 0.62)),
+                        duration=random.uniform(0.35, 0.65),
+                    )
+                except Exception:
+                    pass
                 time.sleep(random.uniform(1.0, 2.5))
 
         # 评论/发圈：阅读完成后再补滚到留言区
@@ -1688,25 +2173,29 @@ class PublicAccountBrowser:
             )
 
     def _article_read_scroll_once(self, w: int, h: int):
-        """单次向下阅读滑动。"""
+        """单次向下阅读滑动。微信 WebView 有时会抛 SecurityException，静默跳过。"""
         start_x = int(w * random.uniform(0.47, 0.56))
         end_x = int(w * random.uniform(0.45, 0.54))
         start_y = int(h * random.uniform(0.73, 0.82))
         end_y = int(h * random.uniform(0.40, 0.56))
         duration = random.uniform(0.75, 1.25)
-        self.d.swipe(start_x, start_y, end_x, end_y, duration=duration)
+        try:
+            self.d.swipe(start_x, start_y, end_x, end_y, duration=duration)
+        except Exception as e:
+            logger.debug(f"[{self.account_id}] 文章内滑动失败(忽略): {type(e).__name__}")
 
     def _ocr_region_blob(self, y_min_ratio: float, y_max_ratio: float) -> str:
         return self._ocr_screen_blob(y_min_ratio, y_max_ratio)
 
     def _is_article_bottom_visible(self) -> bool:
-        """OCR 判断当前是否已滚到文章底部（「留言」与「写留言」须同时可见）。"""
-        blob = self._ocr_region_blob(0.52, 1.0)
-        if _ARTICLE_BOTTOM_INPUT not in blob:
+        """OCR 判断当前是否已滚到文章底部（「留言」在上、「写留言」在下）。"""
+        # 你的反馈是：布局上「留言」在「写留言」之上。
+        # 因此不要把两者都限制在 0.52~1.0 的单一窗口里，否则会裁掉上面的「留言」。
+        lower_blob = self._ocr_region_blob(0.58, 1.0)
+        if _ARTICLE_BOTTOM_INPUT not in lower_blob:
             return False
-        # 「留言」须作为区块标题独立出现，不能仅靠「写留言」内的子串
-        remainder = blob.replace(_ARTICLE_BOTTOM_INPUT, "")
-        return _ARTICLE_BOTTOM_TITLE in remainder
+        upper_blob = self._ocr_region_blob(0.40, 0.85)
+        return _ARTICLE_BOTTOM_TITLE in upper_blob
 
     def _scroll_to_article_bottom(
         self,
@@ -1734,7 +2223,14 @@ class PublicAccountBrowser:
             tail = self._ocr_region_blob(0.68, 1.0)[:120]
             if tail and tail == prev_tail:
                 stagnant += 1
-                if stagnant >= 2 and idx + 1 >= min_scrolls:
+                if stagnant == 2 and idx + 1 >= min_scrolls:
+                    # 先点击屏幕中部让 WebView 重新获焦（有时可恢复 swipe 注入权限）
+                    try:
+                        self.d.click(int(w * 0.5), int(h * 0.5))
+                        time.sleep(0.4)
+                    except Exception:
+                        pass
+                if stagnant >= 4 and idx + 1 >= min_scrolls:
                     logger.debug(
                         f"[{self.account_id}] 文章滚动停滞，视为已到底 (scrolls={idx + 1})"
                     )

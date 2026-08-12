@@ -239,6 +239,78 @@ async def cmd_fast_debug(args):
 
 
 # ================================================================
+# 命令：cold-start-burst — 14 天冷启动连续验证
+# ================================================================
+
+async def cmd_cold_start_burst(args):
+    """连续执行 Day1-14 冷启动模板（走生产 handler 链）。"""
+    from scripts.cold_start_burst import ColdStartBurstScript, run_cold_start_burst
+
+    print("=" * 55)
+    print("  14 天冷启动验证 — 连续执行模板剧本")
+    print("=" * 55)
+
+    devices = device_manager.discover_and_connect_all()
+    if not devices:
+        print("[FAIL] 未发现设备，请检查 USB 连接")
+        return
+
+    serials = list(devices.keys())
+    serial = getattr(args, "serial", None)
+    if serial:
+        if serial not in devices:
+            print(f"[FAIL] 指定设备不在线: {serial}")
+            return
+    elif len(serials) == 1:
+        serial = serials[0]
+    else:
+        print(f"发现 {len(serials)} 台设备:")
+        for i, s in enumerate(serials):
+            print(f"  [{i}] {s}")
+        idx = int(input("请选择设备编号: ") or "0")
+        serial = serials[idx]
+
+    print(f"\n使用设备: {serial}")
+    device_manager.ensure_wechat_foreground(serial)
+
+    account_id = device_manager.get_bound_account(serial) or f"burst_{serial[:6]}"
+    account = db.get_account(account_id)
+    if not account:
+        db.insert_account(
+            id=account_id,
+            device_serial=serial,
+            stage="trust_building",
+            registration_date=date.today().isoformat(),
+            mode="full",
+            state="normal",
+        )
+        db.bind_device(serial=serial, account_id=account_id)
+        print(f"临时账号: {account_id}")
+    else:
+        print(f"账号: {account_id} | 阶段: {account.get('stage', 'trust_building')}")
+
+    persona = random_persona()
+    d = device_manager.get_device(serial)
+    h = Humanizer()
+    wc = WeChatControl(d, h, account_id=account_id)
+    script = ColdStartBurstScript(wc, persona, db)
+
+    day = getattr(args, "day", None)
+    day_from = day_to = int(day) if day else 1
+    if not day:
+        day_to = 14
+
+    result = await run_cold_start_burst(
+        script,
+        full=getattr(args, "full", False),
+        day_from=day_from,
+        day_to=day_to,
+    )
+    if result.get("fail", 0) > 0:
+        raise SystemExit(1)
+
+
+# ================================================================
 # 命令：enterprise-smoke — 企业级真机冒烟
 # ================================================================
 
@@ -508,6 +580,24 @@ def main():
     )
     p_ent.add_argument("--serial", default=None, help="指定设备序列号")
 
+    # cold-start-burst
+    p_burst = subparsers.add_parser(
+        "cold-start-burst",
+        help="14 天冷启动连续验证（走生产 handler 链）",
+    )
+    p_burst.add_argument(
+        "--full",
+        action="store_true",
+        help="完整时长（按模板原始 duration，可能数小时）",
+    )
+    p_burst.add_argument(
+        "--day",
+        type=int,
+        default=None,
+        help="只跑指定天（1-14），用于快速抽查",
+    )
+    p_burst.add_argument("--serial", default=None, help="指定设备序列号")
+
     # run
     p_run = subparsers.add_parser("run", help="生产模式（全部设备）")
 
@@ -542,6 +632,8 @@ def main():
         asyncio.run(cmd_fast_debug(args))
     elif args.command == "enterprise-smoke":
         asyncio.run(cmd_enterprise_smoke(args))
+    elif args.command == "cold-start-burst":
+        asyncio.run(cmd_cold_start_burst(args))
     elif args.command == "run":
         asyncio.run(cmd_run(args))
     elif args.command == "status":

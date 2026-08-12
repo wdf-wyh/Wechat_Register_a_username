@@ -50,58 +50,329 @@ class SocialActions:
 
     def follow_public_account(self, name: str) -> bool:
         """
-        搜索公众号并尝试关注，随后短暂浏览。
+        关注公众号标准流程（可重复多次）：
 
-        Returns:
-            是否至少打开了目标页（关注按钮可能已关注过）
+        1. 保证在微信首页（会话 Tab）
+        2. 点右上角放大镜进入搜索页
+        3. 在顶部搜索框输入公众号名
+        4. 点键盘右下角绿色「搜索」
+        5. 在结果里点对应公众号，进入公众号主页
+        6. 点绿色「关注」；变为灰色「已关注」即成功
         """
         if not name:
             return False
+        name = str(name).strip()
         logger.info(f"[{self.account_id}] 关注公众号: {name}")
         try:
             from core.search_helper import SearchHelper
+            from core.wechat_nav import lock_portrait
+            from utils.image_utils import save_debug_screenshot
 
+            lock_portrait(self.d)
+            try:
+                self.w, self.h = self.d.window_size()
+            except Exception:
+                pass
+
+            # 1) 微信首页
+            self._ensure_wechat_home(close_capsule=True)
+
+            # 2~4) 放大镜 → 输入 → 键盘绿钮搜索
             helper = SearchHelper(self.d, account_id=self.account_id)
             if not helper.search(name):
+                save_debug_screenshot(self.d, self.account_id, "follow_pa_search_fail")
+                return False
+            time.sleep(1.2)
+
+            # 5) 点对应公众号结果
+            if not self._click_public_account_search_result(name):
+                save_debug_screenshot(self.d, self.account_id, "follow_pa_no_result")
+                logger.warning(f"[{self.account_id}] 未点到公众号结果: {name}")
+                self._ensure_wechat_home(close_capsule=False)
                 return False
             time.sleep(1.5)
 
-            # 优先点「公众号」分区下的结果
-            clicked = self._ocr_click_any(
-                [name, "公众号"],
-                y_min=0.12,
-                y_max=0.85,
-            )
-            if not clicked:
-                # 点第一条结果区域
-                click_ratio(self.d, 0.45, 0.22)
-            time.sleep(2.0)
-
-            # 尝试点「关注」；已关注则忽略
-            followed = self._ocr_click_any(["关注", "关注公众号"], y_min=0.5, y_max=0.95)
-            if followed:
-                logger.info(f"[{self.account_id}] 已点击关注: {name}")
-                time.sleep(1.5)
+            # 6) 绿钮关注 → 已关注
+            ok = self._follow_on_public_account_home(name)
+            if ok:
+                logger.info(f"[{self.account_id}] 关注成功(已关注): {name}")
             else:
-                logger.debug(f"[{self.account_id}] 未找到关注按钮(可能已关注): {name}")
+                save_debug_screenshot(self.d, self.account_id, "follow_pa_btn_fail")
+                logger.warning(f"[{self.account_id}] 关注未确认成功: {name}")
 
-            # 短暂浏览像真人
-            for _ in range(random.randint(2, 4)):
-                self.d.swipe(
-                    int(self.w * 0.5),
-                    int(self.h * 0.7),
-                    int(self.w * 0.5),
-                    int(self.h * 0.35),
-                    duration=0.4,
-                )
-                time.sleep(random.uniform(1.5, 3.5))
+            # 短暂浏览后回首页，便于连续关注下一个
+            if ok:
+                for _ in range(random.randint(1, 3)):
+                    self.d.swipe(
+                        int(self.w * 0.5),
+                        int(self.h * 0.68),
+                        int(self.w * 0.5),
+                        int(self.h * 0.38),
+                        duration=0.35,
+                    )
+                    time.sleep(random.uniform(1.0, 2.2))
 
-            self.d.press("back")
-            time.sleep(0.5)
-            self.d.press("back")
-            return True
+            self._ensure_wechat_home(close_capsule=False)
+            return ok
         except Exception as e:
             logger.error(f"[{self.account_id}] 关注公众号失败: {e}")
+            try:
+                self._ensure_wechat_home(close_capsule=False)
+            except Exception:
+                pass
+            return False
+
+    def _click_public_account_search_result(self, name: str) -> bool:
+        """搜索结果页：优先切到「公众号」分区，再点同名条目。"""
+        # 顶部筛选里点「公众号」（避免点到文章/聊天记录）
+        self._ocr_click_any(["公众号"], y_min=0.06, y_max=0.32)
+        time.sleep(0.7)
+        self._invalidate_ocr_cache()
+
+        # 精确点名称
+        if self._ocr_click_public_account_name(name):
+            time.sleep(1.2)
+            if self._looks_like_public_account_home(name):
+                return True
+
+        # 名称 + 「公众号」行附近再试
+        if self._ocr_click_any([name], y_min=0.12, y_max=0.88):
+            time.sleep(1.2)
+            if self._looks_like_public_account_home(name):
+                return True
+
+        # 兜底：点靠上的第一条结果区（搜索后首条常为公众号）
+        for ry in (0.22, 0.28, 0.34):
+            click_ratio(self.d, 0.45, ry)
+            time.sleep(1.2)
+            if self._looks_like_public_account_home(name):
+                return True
+            self.d.press("back")
+            time.sleep(0.5)
+        return self._looks_like_public_account_home(name)
+
+    def _ocr_click_public_account_name(self, name: str) -> bool:
+        """OCR 点与目标名最匹配的结果行（优先精确相等）。"""
+        reader = self._ensure_ocr()
+        if reader is None:
+            return False
+        try:
+            img = np.array(self.d.screenshot(format="pillow"))
+            gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+            enhanced = self._clahe.apply(gray) if self._clahe is not None else gray
+            results = reader.readtext(cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR))
+            y0, y1 = int(self.h * 0.12), int(self.h * 0.88)
+            best = None  # (priority, y, cx, cy)
+            name_n = name.replace(" ", "")
+            for bbox, text, conf in results:
+                if conf < 0.30:
+                    continue
+                t = str(text or "").strip().replace(" ", "")
+                if not t:
+                    continue
+                cy = int((bbox[0][1] + bbox[2][1]) / 2)
+                cx = int((bbox[0][0] + bbox[2][0]) / 2)
+                if cy < y0 or cy > y1:
+                    continue
+                if t == name_n:
+                    pri = 0
+                elif name_n in t or t in name_n:
+                    pri = 1
+                else:
+                    continue
+                cand = (pri, cy, cx, cy)
+                if best is None or cand < best:
+                    best = cand
+            if best is None:
+                return False
+            self.d.click(best[2], best[3])
+            self._invalidate_ocr_cache()
+            return True
+        except Exception as e:
+            logger.debug(f"[{self.account_id}] 点公众号名失败: {e}")
+            return False
+
+    def _looks_like_public_account_home(self, name: str = "") -> bool:
+        """是否已进入公众号主页（可关注/已关注）。"""
+        blob = self._ocr_screen_blob(force=True)
+        if any(k in blob for k in ("搜索指定内容", "搜索发现")):
+            return False
+        markers = ("已关注", "关注公众号", "历史消息", "发消息", "视频号")
+        hit = sum(1 for k in markers if k in blob)
+        if "关注" in blob and "已关注" not in blob:
+            hit += 1
+        if name and name.replace(" ", "") in blob.replace(" ", ""):
+            hit += 1
+        return hit >= 1 and (
+            "已关注" in blob
+            or ("关注" in blob and "搜索指定内容" not in blob)
+            or "历史消息" in blob
+            or "发消息" in blob
+        )
+
+    def _is_already_followed(self) -> bool:
+        blob = self._ocr_screen_blob(force=True)
+        return "已关注" in blob
+
+    def _follow_on_public_account_home(self, name: str) -> bool:
+        """公众号主页：点绿色关注，确认变为「已关注」。"""
+        self._scroll_public_account_home_to_top()
+
+        if self._is_already_followed():
+            logger.info(f"[{self.account_id}] 已是关注状态: {name}")
+            return True
+
+        # 1) OCR 精确点顶栏「关注」（避免颜色误点下方文章封面/链接）
+        if self._ocr_click_exact_follow():
+            time.sleep(1.2)
+            if self._recover_from_follow_misclick():
+                if self._is_already_followed():
+                    return True
+
+        # 2) 颜色找顶栏绿色关注钮（仅 y<0.38）
+        if self._click_green_follow_button():
+            time.sleep(1.2)
+            if self._recover_from_follow_misclick():
+                if self._is_already_followed():
+                    return True
+
+        # 3) 机型坐标兜底（主页顶栏/profile 区）
+        for rx, ry in ((0.50, 0.30), (0.50, 0.34), (0.50, 0.38), (0.72, 0.18)):
+            if self._is_already_followed():
+                return True
+            click_ratio(self.d, rx, ry)
+            time.sleep(1.0)
+            if self._recover_from_follow_misclick():
+                if self._is_already_followed():
+                    return True
+
+        return self._is_already_followed()
+
+    def _scroll_public_account_home_to_top(self) -> None:
+        """公众号主页滚到顶部，避免关注钮被顶栏/文章列表遮挡。"""
+        try:
+            for _ in range(2):
+                self.d.swipe(
+                    int(self.w * 0.5),
+                    int(self.h * 0.28),
+                    int(self.w * 0.5),
+                    int(self.h * 0.72),
+                    duration=0.35,
+                )
+                time.sleep(0.35)
+        except Exception:
+            pass
+        self._invalidate_ocr_cache()
+
+    def _recover_from_follow_misclick(self) -> bool:
+        """
+        关注点击后校验：若误入文章正文则返回主页再判。
+        Returns: 当前是否可继续判定关注结果（True=在主页或已成功）
+        """
+        if self._is_already_followed():
+            return True
+        blob = self._ocr_screen_blob(force=True)
+        # 误入文章：有留言/分享底栏，且顶栏不是主页态
+        in_article = any(
+            k in blob for k in ("说点什么", "写留言", "写评论", "阅读原文", "收藏/评论")
+        ) and not any(k in blob for k in ("历史消息", "发消息"))
+        if in_article:
+            logger.warning(f"[{self.account_id}] 关注误点进文章，返回主页重试")
+            self.d.press("back")
+            time.sleep(0.9)
+            self._invalidate_ocr_cache()
+            self._scroll_public_account_home_to_top()
+        return True
+
+    def _find_green_follow_button(
+        self, y_min: float = 0.08, y_max: float = 0.38
+    ):
+        """公众号主页顶栏/profile 区绿色「关注」按钮（勿扫下方文章区）。"""
+        try:
+            shot = self.d.screenshot(format="opencv")
+            if shot is None:
+                return None
+            h, w = shot.shape[:2]
+            hsv = cv2.cvtColor(shot, cv2.COLOR_BGR2HSV)
+            mask = cv2.inRange(
+                hsv, np.array([35, 60, 60]), np.array([95, 255, 255])
+            )
+            y0, y1 = int(h * y_min), int(h * y_max)
+            mask[:y0, :] = 0
+            mask[y1:, :] = 0
+            mask[:, : int(w * 0.05)] = 0
+            mask[:, int(w * 0.95) :] = 0
+            contours, _ = cv2.findContours(
+                mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            )
+            best = None  # (cy, cx, cy) — 取最靠上的绿钮（关注在 profile 区）
+            min_area = w * h * 0.0015
+            max_area = w * h * 0.06
+            for c in contours:
+                x, y, bw, bh = cv2.boundingRect(c)
+                area = bw * bh
+                if area < min_area or area > max_area:
+                    continue
+                # 关注钮：顶栏横向圆角条，较宽
+                if bw < w * 0.18 or bh < h * 0.018 or bh > h * 0.10:
+                    continue
+                cx, cy = x + bw // 2, y + bh // 2
+                cand = (cy, cx, cy)
+                if best is None or cand < best:
+                    best = cand
+            if best is None:
+                return None
+            return best[1] / w, best[2] / h
+        except Exception as e:
+            logger.debug(f"[{self.account_id}] 关注绿钮检测失败: {e}")
+            return None
+
+    def _click_green_follow_button(self) -> bool:
+        pt = self._find_green_follow_button()
+        if not pt:
+            return False
+        click_ratio(self.d, float(pt[0]), float(pt[1]))
+        logger.info(
+            f"[{self.account_id}] 绿钮点「关注」 @({pt[0]:.3f},{pt[1]:.3f})"
+        )
+        self._invalidate_ocr_cache()
+        return True
+
+    def _ocr_click_exact_follow(self) -> bool:
+        """OCR 只点文案恰好为「关注」的绿钮文字，跳过「已关注」。"""
+        reader = self._ensure_ocr()
+        if reader is None:
+            return False
+        try:
+            img = np.array(self.d.screenshot(format="pillow"))
+            gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+            enhanced = self._clahe.apply(gray) if self._clahe is not None else gray
+            results = reader.readtext(cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR))
+            y0, y1 = int(self.h * 0.08), int(self.h * 0.38)
+            best = None
+            for bbox, text, conf in results:
+                if conf < 0.30:
+                    continue
+                t = str(text or "").strip().replace(" ", "")
+                if t not in ("关注", "关注公众号"):
+                    continue
+                if "已关注" in t:
+                    continue
+                cy = int((bbox[0][1] + bbox[2][1]) / 2)
+                cx = int((bbox[0][0] + bbox[2][0]) / 2)
+                if cy < y0 or cy > y1:
+                    continue
+                cand = (cy, cx, cy)
+                if best is None or cand < best:
+                    best = cand
+            if best is None:
+                return False
+            self.d.click(best[1], best[2])
+            self._invalidate_ocr_cache()
+            logger.info(f"[{self.account_id}] OCR 精确点「关注」")
+            return True
+        except Exception as e:
+            logger.debug(f"[{self.account_id}] OCR 点关注失败: {e}")
             return False
 
     # ================================================================
@@ -170,6 +441,13 @@ class SocialActions:
                 logger.info(f"[{self.account_id}] 已是好友: {keyword}")
                 self.d.press("back")
                 return True
+
+            # 严格确认已在用户资料页再点「添加到通讯录」；视频号等页面有相似绿色元素会误点
+            if not self._is_user_profile_page():
+                save_debug_screenshot(self.d, self.account_id, "add_friend_not_profile")
+                logger.warning(f"[{self.account_id}] 点击搜索结果后未进入资料页，跳过添加: {keyword}")
+                self.d.press("back")
+                return False
 
             # 关键两步：① 添加到通讯录  ② 申请页填验证+备注并发送
             if not self._click_add_to_contacts():
@@ -344,11 +622,14 @@ class SocialActions:
             and any(k in blob for k in ("电话", "签名", "地区"))
         )
 
-    def _find_green_add_button(self, y_min: float = 0.36, y_max: float = 0.72):
+    def _find_green_add_button(self, y_min: float = 0.36, y_max: float = 0.65):
         """
         用颜色找资料页绿色「添加到通讯录」按钮中心（比例坐标）。
 
         红米实测按钮约 y=0.43；电话行约 y=0.29。
+        资料页下半区会展示用户发布的视频号视频缩略图，封面中可能有大块绿色，
+        须用宽高比过滤：「添加到通讯录」是横条按钮（宽/高 >> 1），
+        视频缩略图的绿色块宽高比通常接近正方形，不满足横条条件。
         """
         try:
             shot = self.d.screenshot(format="opencv")
@@ -374,7 +655,14 @@ class SocialActions:
                 area = bw * bh
                 if area < min_area:
                     continue
-                if bw < w * 0.40 or bh < h * 0.022 or bh > h * 0.12:
+                # 高度范围：按钮条（不能太窄也不能太高）
+                if bh < h * 0.022 or bh > h * 0.09:
+                    continue
+                # 宽度：必须横跨屏幕主体（>= 40%）
+                if bw < w * 0.40:
+                    continue
+                # 宽高比：横条按钮宽高比至少 5:1；视频封面绿色块宽高比通常 < 3
+                if bw / max(bh, 1) < 5:
                     continue
                 cx, cy = x + bw // 2, y + bh // 2
                 if best is None or area > best[0]:
@@ -411,7 +699,7 @@ class SocialActions:
         def _after_click_ok() -> bool:
             self._invalidate_ocr_cache()
             time.sleep(0.7)
-            if self._find_green_add_button(y_min=0.36, y_max=0.70):
+            if self._find_green_add_button(y_min=0.36, y_max=0.65):
                 return False
             if self._looks_like_friend_request_fast():
                 return True
@@ -420,11 +708,11 @@ class SocialActions:
             return False
 
         def _try_green() -> bool:
-            pt = self._find_green_add_button(y_min=0.36, y_max=0.70)
+            pt = self._find_green_add_button(y_min=0.36, y_max=0.65)
             if not pt:
                 return False
             rx, ry = float(pt[0]), float(pt[1])
-            if ry < 0.36 or ry > 0.70:
+            if ry < 0.36 or ry > 0.65:
                 return False
             click_ratio(self.d, rx, ry)
             if _after_click_ok():
@@ -469,11 +757,11 @@ class SocialActions:
                 )
                 return True
 
-        # 3) OCR 兜底
+        # 3) OCR 兜底：「添加到通讯录」文字在屏幕上半区，y_max 收到 0.65 避开视频卡片
         if self._ocr_click_phrase(
             phrases,
             y_min=0.36,
-            y_max=0.72,
+            y_max=0.65,
             strict=True,
             avoid_keywords=("电话", "呼叫", "复制", "取消"),
         ):
@@ -484,7 +772,7 @@ class SocialActions:
         try:
             self.d.swipe(
                 int(self.w * 0.5),
-                int(self.h * 0.70),
+                int(self.h * 0.65),
                 int(self.w * 0.5),
                 int(self.h * 0.48),
                 duration=0.28,
@@ -499,7 +787,7 @@ class SocialActions:
         if self._ocr_click_phrase(
             phrases,
             y_min=0.34,
-            y_max=0.75,
+            y_max=0.65,
             strict=True,
             avoid_keywords=("电话", "呼叫", "复制", "取消"),
         ):
@@ -875,7 +1163,7 @@ class SocialActions:
             for bbox, text, conf in results:
                 if conf < 0.30:
                     continue
-                t = str(text or "").strip().replace(" ", "")
+                t = self._normalize_friend_add_ocr_text(str(text or ""))
                 if not t:
                     continue
                 cx = int((bbox[0][0] + bbox[2][0]) / 2)
@@ -2395,6 +2683,24 @@ class SocialActions:
         self._ocr_blob = ""
         self._ocr_blob_ts = 0.0
 
+    def _normalize_friend_add_ocr_text(self, text: str) -> str:
+        """
+        把“添加到通讯录”相关 OCR 识别结果做容错规范化：
+        - 繁体：通訊/通訊錄/錄 -> 通讯/通讯录/录
+        - 常见同形字符：訊 -> 讯、電話/電話號等（本函数只做与加好友相关的轻量映射）
+        """
+        t = (text or "").strip()
+        # 空格会影响子串匹配
+        t = re.sub(r"\s+", "", t)
+        # 繁体/异体映射（只针对和“添加到通讯录”相关的字形差异）
+        t = t.replace("通訊", "通讯")
+        t = t.replace("通訊錄", "通讯录")
+        t = t.replace("通訊錄", "通讯录")
+        t = t.replace("通訊录", "通讯录")  # 兜底：混合大小写/简繁
+        t = t.replace("錄", "录")
+        t = t.replace("訊", "讯")
+        return t
+
     def _ocr_screen_blob(self, force: bool = False) -> str:
         """全屏 OCR 一次，短时复用，避免同页反复扫屏。"""
         now = time.time()
@@ -2412,7 +2718,11 @@ class SocialActions:
             gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
             enhanced = self._clahe.apply(gray) if self._clahe is not None else gray
             results = reader.readtext(cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR))
-            blob = " ".join(str(t) for _, t, c in results if c > 0.25)
+            blob = " ".join(
+                self._normalize_friend_add_ocr_text(str(t))
+                for _, t, c in results
+                if c > 0.25
+            )
             self._ocr_blob = blob
             self._ocr_blob_ts = now
             return blob

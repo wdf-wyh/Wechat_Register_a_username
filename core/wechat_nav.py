@@ -257,11 +257,133 @@ def goto_tab(d, tab: str = "wechat"):
     time.sleep(1.5)
 
 
-def open_search(d) -> bool:
-    """在微信首页点击搜索图标（多候选，按机型）。
+def locate_home_search_icon(d) -> Optional[tuple[float, float]]:
+    """
+    在微信首页顶栏视觉定位放大镜（两个深色图标中偏左的那个）。
 
-    必须已在微信前台；像素差 alone 不够（桌面点顶栏也会 diff 很大），
-    点到「+」菜单时自动 back 并换下一候选。
+    Returns:
+        (rx, ry) 比例坐标；找不到则 None
+    """
+    import cv2
+    import numpy as np
+
+    try:
+        shot = d.screenshot(format="opencv")
+        if shot is None:
+            return None
+        h, w = shot.shape[:2]
+        y0, y1 = int(h * 0.040), int(h * 0.100)
+        x0, x1 = int(w * 0.68), int(w * 0.99)
+        roi = shot[y0:y1, x0:x1]
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        mask = (gray < 100).astype(np.uint8) * 255
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+        contours, _ = cv2.findContours(
+            mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+        icons = []
+        for c in contours:
+            x, y, bw, bh = cv2.boundingRect(c)
+            area = bw * bh
+            if area < 80 or area > 6000:
+                continue
+            if bw < 12 or bh < 12 or bw > 90 or bh > 90:
+                continue
+            # 近似方形图标
+            if abs(bw - bh) > 25:
+                continue
+            cx = x0 + x + bw // 2
+            cy = y0 + y + bh // 2
+            icons.append((cx, cy, area))
+        if len(icons) < 1:
+            return None
+        icons.sort(key=lambda t: t[0])
+        # 右侧通常是「+」；取最右两个里偏左的，或仅一个时用它
+        if len(icons) >= 2:
+            # 过滤：最右若明显是加号，取它左边那个
+            left, right = icons[-2], icons[-1]
+            # 加号一般更靠右 (rx>~0.90)
+            if right[0] / w >= 0.90 and left[0] / w < 0.90:
+                cx, cy = left[0], left[1]
+            else:
+                # 取最左的合理候选（排除过左的噪声）
+                cx, cy = left[0], left[1]
+        else:
+            cx, cy = icons[0][0], icons[0][1]
+        rx, ry = cx / w, cy / h
+        # 放大镜不应贴右边（那是 +）
+        if rx >= 0.92:
+            return None
+        return rx, ry
+    except Exception as e:
+        logger.debug(f"locate_home_search_icon 失败: {e}")
+        return None
+
+
+def _ocr_region_blob(d, y_max_ratio: float = 0.48) -> str:
+    """截屏 OCR 上半屏，用于判定搜索页 / 加号菜单（微信无障碍不可靠）。"""
+    import cv2
+    import numpy as np
+
+    try:
+        from utils.ocr_utils import create_easyocr_reader
+
+        reader = create_easyocr_reader()
+        img = np.array(d.screenshot(format="pillow"))
+        h = img.shape[0]
+        crop = img[0 : int(h * y_max_ratio), :]
+        gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
+        results = reader.readtext(cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR))
+        return " ".join(str(t) for _, t, c in results if c > 0.28)
+    except Exception:
+        return ""
+
+
+def _is_plus_menu_blob(blob: str) -> bool:
+    markers = ("发起群聊", "添加朋友", "扫一扫", "收付款", "面对面建群")
+    return sum(1 for m in markers if m in blob) >= 2 or (
+        "发起群聊" in blob and "添加朋友" in blob
+    )
+
+
+def _is_wechat_search_blob(blob: str) -> bool:
+    if _is_plus_menu_blob(blob):
+        return False
+    # 新版微信全局搜索 FTSMainUI（含 AI/最近在搜）
+    if any(
+        k in blob
+        for k in (
+            "最近在搜",
+            "搜索本地或网络结果",
+            "搜索指定内容",
+            "AI搜索",
+            "A1搜索",
+            "深度思考",
+        )
+    ):
+        return True
+    tabs = ("聊天记录", "朋友圈", "文章", "公众号", "小程序", "联系人", "全部")
+    if sum(1 for t in tabs if t in blob) >= 2:
+        return True
+    if "搜索" in blob and sum(1 for t in tabs if t in blob) >= 1:
+        return True
+    return False
+
+
+def _is_wechat_search_activity(d) -> bool:
+    try:
+        act = str(d.app_current().get("activity") or "")
+    except Exception:
+        return False
+    act_l = act.lower()
+    return ("fts" in act_l) or ("search" in act_l and "launcher" not in act_l)
+
+
+def open_search(d) -> bool:
+    """在微信首页点击搜索图标（视觉定位 + 机型候选）。
+
+    必须已在微信前台。不能仅靠像素差：点到「+」菜单 diff 也很大。
+    以 Activity/OCR 确认微信搜索页为准；误开加号菜单则 back 换下一候选。
     """
     import cv2
     import numpy as np
@@ -274,54 +396,91 @@ def open_search(d) -> bool:
     img_before = np.array(d.screenshot(format="pillow"))
     gray_before = cv2.cvtColor(img_before, cv2.COLOR_RGB2GRAY)
 
-    # 避开最右侧「+」：rx>=0.94 几乎必中加号菜单
-    candidates = [
-        (rx, ry) for rx, ry in search_icon_candidates_for(d) if float(rx) < 0.94
-    ]
-    if not candidates:
-        candidates = list(search_icon_candidates_for(d))
+    candidates: list[tuple[float, float]] = []
+    located = locate_home_search_icon(d)
+    if located:
+        candidates.append((float(located[0]), float(located[1])))
+        logger.info(
+            f"open_search 视觉定位放大镜 @({located[0]:.3f},{located[1]:.3f})"
+        )
 
-    plus_menu_markers = ("发起群聊", "添加朋友", "扫一扫", "收付款")
+    # 避开最右侧「+」：rx>=0.92 几乎必中加号
+    for rx, ry in search_icon_candidates_for(d):
+        if float(rx) >= 0.92:
+            continue
+        pt = (float(rx), float(ry))
+        if not any(
+            abs(pt[0] - c[0]) < 0.012 and abs(pt[1] - c[1]) < 0.012
+            for c in candidates
+        ):
+            candidates.append(pt)
+
+    if not candidates:
+        candidates = [
+            (float(rx), float(ry))
+            for rx, ry in search_icon_candidates_for(d)
+            if float(rx) < 0.92
+        ]
 
     for rx, ry in candidates:
+        if d.app_current().get("package") != WECHAT_PKG:
+            logger.warning("open_search: 微信不在前台，中止")
+            return False
         cx, cy = int(w * rx), int(h * ry)
         d.click(cx, cy)
         time.sleep(1.2)
         if dismiss_app_chooser(d):
             time.sleep(0.5)
-        if d.app_current().get("package") != WECHAT_PKG:
-            logger.warning("open_search: 点击后离开微信，中止")
-            return False
+        cur = d.app_current()
+        if cur.get("package") != WECHAT_PKG:
+            logger.warning("open_search: 点击后离开微信，返回重试")
+            try:
+                d.app_start(WECHAT_PKG)
+                time.sleep(2.0)
+            except Exception:
+                pass
+            continue
+
+        # Activity 最快最准：FTSMainUI
+        if _is_wechat_search_activity(d):
+            logger.info(
+                f"搜索页已打开 @({rx:.3f},{ry:.3f}) activity={cur.get('activity')}"
+            )
+            return True
 
         img_after = np.array(d.screenshot(format="pillow"))
         gray_after = cv2.cvtColor(img_after, cv2.COLOR_RGB2GRAY)
-        diff = float(np.mean(cv2.absdiff(
-            gray_after.astype(np.int16), gray_before.astype(np.int16))))
+        diff = float(
+            np.mean(
+                cv2.absdiff(
+                    gray_after.astype(np.int16), gray_before.astype(np.int16)
+                )
+            )
+        )
 
-        # 粗 OCR：是否误开 + 菜单
-        top = gray_after[0:int(h * 0.45), :]
-        try:
-            # 轻量：只看是否出现加号菜单文案（用像素区域即可，OCR 由调用方再验）
-            # 这里用 u2 文本兜底，微信无障碍常失败则跳过
-            blob = ""
-            for marker in plus_menu_markers:
-                if d(textContains=marker).exists(timeout=0.15):
-                    blob = marker
-                    break
-        except Exception:
-            blob = ""
-
-        if blob:
-            logger.debug(f"open_search 误触加号菜单 @({cx},{cy})，返回重试")
+        blob = _ocr_region_blob(d, y_max_ratio=0.50)
+        if _is_plus_menu_blob(blob):
+            logger.info(f"open_search 误触加号菜单 @({rx:.3f},{ry:.3f})，返回重试")
             d.press("back")
             time.sleep(0.5)
             continue
 
-        if diff > 8:
-            logger.debug(f"搜索页已打开 ({cx},{cy}) diff={diff:.0f}")
+        if _is_wechat_search_blob(blob):
+            logger.info(f"搜索页已打开 @({rx:.3f},{ry:.3f}) diff={diff:.0f}")
             return True
+
+        # 像素变了但不是搜索页：多半点偏，退回再试
+        if diff > 8:
+            logger.info(
+                f"open_search 点击后非搜索页 @({rx:.3f},{ry:.3f}) "
+                f"diff={diff:.0f} act={cur.get('activity')} blob={blob[:60]!r}"
+            )
+            d.press("back")
+            time.sleep(0.45)
+            continue
+
         d.press("back")
-        time.sleep(0.4)
+        time.sleep(0.35)
     return False
 
 

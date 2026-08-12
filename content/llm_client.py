@@ -1235,8 +1235,9 @@ class LLMClient:
 2. 禁止 manual_forbidden / behavior_forbidden 中的动作（尤其群发、自动回复）
 3. 遵守 hard_limits 与 add_friend_cap_today 当日上限（超过的不要排）
 4. 活跃时间仅 07:00-23:00；必须包含一条 sleep；禁止凌晨频繁操作
-5. 新号前期（day1_3）以社交种子培育为主：每天关注 2 个公众号，阅读推文约 10 分钟；仅可按 seed_friends/手机号名单加好友，节奏固定为 Day1=1、Day2=2、Day3=2
-5.1 如果排 follow_public_account，优先使用 public_accounts 里的行业相关公众号，不要选泛新闻号，除非行业名单不足
+5. 新号前期（day1_3）以社交种子培育为主；仅可按 seed_friends/手机号名单加好友，节奏固定为 Day1=1、Day2=2、Day3=2
+5.0 Day1 专项只排三项核心：add_friend(count=1)、follow_public_account(count=2, industry_only)、read_article(duration≈600, comment_rate≥0.5)；不要额外排视频号/搜索/小程序/支付页
+5.1 如果排 follow_public_account，优先 industry_public_accounts（行业相关），不要选泛新闻号，除非行业名单不足
 6. 首周加好友不得超过 3 人/天；day4_7 相位不要排 add_friend；day1_3 只能排当日上限内的 add_friend，且不得出现发圈、深聊、群聊、朋友圈点赞评论
 7. 前 14 天禁止群发（含 send_message 多目标/mass/broadcast）、禁止自动回复
 8. 动作数量建议 8-14 个，时间窗不要全部重叠在同一小时

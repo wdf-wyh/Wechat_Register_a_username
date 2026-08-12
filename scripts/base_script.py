@@ -556,23 +556,47 @@ class BaseScript(ABC):
         return browser._comment_current(text)
 
     def _handle_read_article(self, params: dict) -> bool:
-        """阅读公众号文章（OCR 方案）"""
+        """阅读公众号文章；与 public_account_comment_smoke 同一 browse 发送链路。"""
         from core.public_account_browser import PublicAccountBrowser
-        duration = params.get("duration", 180)
+
+        # smoke：ensure_wechat_home → browse(comment_rate=1.0)
+        # Day1 前序有加好友/关注搜索，必须先清场回主页，否则常进错页/找不到留言入口
+        self.wc.ensure_wechat_home()
+        self.h.random_sleep(0.4, 0.9)
+
+        duration = int(params.get("duration", 180))
         comment_rate = float(params.get("comment_rate", 0.15))
         post_after_read = bool(params.get("post_after_read", False))
         post_rate = float(params.get("post_rate", 0.0))
+        require_comment = bool(params.get("require_comment", comment_rate >= 0.99))
+        stop_after = params.get("stop_after_comments")
+        if stop_after is not None:
+            stop_after = int(stop_after)
+
         browser = PublicAccountBrowser(
             self.wc.d,
             account_id=self.account_id,
             persona=self.persona,
         )
-        browser.browse(
+        articles = browser.browse(
             duration_seconds=duration,
             comment_rate=comment_rate,
             post_after_read=post_after_read,
             post_rate=post_rate,
+            stop_after_comments=stop_after,
         )
+        comments = int(getattr(browser, "last_comments_sent", 0) or 0)
+        if articles <= 0:
+            logger.warning(
+                f"[{self.account_id}] 读公众号失败: 0 篇 "
+                f"(duration={duration}, comment_rate={comment_rate})"
+            )
+            return False
+        if require_comment and comments <= 0:
+            logger.warning(
+                f"[{self.account_id}] 读公众号已读 {articles} 篇但留言未成功"
+            )
+            return False
         return True
 
     def _handle_favorite_article(self, params: dict) -> bool:
@@ -580,14 +604,27 @@ class BaseScript(ABC):
         return self.wc.favorite_article()
 
     def _handle_follow_public_account(self, params: dict) -> bool:
-        """关注行业公众号（名单来自 persona.public_accounts）"""
+        """关注公众号（默认优先 industry_public_accounts）"""
         from core.social_actions import SocialActions
         from content.personas import get_public_account_candidates
 
-        names = params.get("names") or get_public_account_candidates(self.persona)
         count = params.get("count", 1)
         if isinstance(count, tuple):
             count = self.h.randint(*count)
+
+        names = params.get("names")
+        if not names:
+            industry_only = bool(params.get("industry_only", False))
+            if industry_only:
+                # 仅行业垂类；不足时再回退通用名单
+                industry = [
+                    str(n).strip()
+                    for n in (self.persona or {}).get("industry_public_accounts", []) or []
+                    if str(n).strip()
+                ]
+                names = industry or get_public_account_candidates(self.persona)
+            else:
+                names = get_public_account_candidates(self.persona)
         if not names:
             # 无配置时用搜索关键词当公众号名（尽力）
             from content.search_keywords import SearchKeywordManager
@@ -599,6 +636,8 @@ class BaseScript(ABC):
             if social.follow_public_account(str(name)):
                 ok += 1
             self.h.random_sleep(2.0, 5.0)
+        # 关注走全局搜索，结束后清场，否则读文进公众号易失败
+        self.wc.ensure_wechat_home()
         return ok > 0
 
     def _handle_global_search(self, params: dict) -> bool:
@@ -865,6 +904,7 @@ class BaseScript(ABC):
                 ok += 1
                 self._increment_daily_count("add_friend")
             self.h.random_sleep(15.0, 40.0)
+        self.wc.ensure_wechat_home()
         return ok > 0
 
     def _registration_day_index(self) -> int:
@@ -914,19 +954,29 @@ class BaseScript(ABC):
         )
 
     def _handle_play_mini_game(self, params: dict) -> bool:
-        """玩官方小游戏（跳一跳等）"""
-        from core.social_actions import SocialActions
-        from content.search_keywords import SearchKeywordManager
+        """
+        玩官方小游戏 — 与 play_mini_game_smoke 同路径。
 
-        duration = params.get("duration", 180)
-        game = params.get("game") or params.get("keyword") or ""
-        if not game and params.get("random_game", True):
-            game = SearchKeywordManager().get_random_keyword(
-                self.persona, category="小游戏"
-            )
-        return SocialActions(self.wc.d, self.account_id).play_mini_game(
-            game_name=str(game or "跳一跳"),
-            duration_seconds=int(duration),
+        默认 game 为空：发现→游戏→找游戏→立即玩。
+        仅 params.random_game=True 时用搜索关键词兜底打开指定游戏。
+        """
+        duration = max(45, int(params.get("duration", 180)))
+        game = str(params.get("game") or params.get("keyword") or "").strip()
+
+        if not game and params.get("random_game"):
+            from content.search_keywords import SearchKeywordManager
+
+            game = str(
+                SearchKeywordManager().get_random_keyword(
+                    self.persona, category="小游戏"
+                )
+                or ""
+            ).strip()
+
+        self.wc.ensure_wechat_home()
+        return self.wc.play_mini_game(
+            game_name=game,
+            duration_seconds=duration,
         )
 
     def _handle_make_payment(self, params: dict) -> bool:

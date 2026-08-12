@@ -12,7 +12,8 @@
   - 禁止凌晨频繁操作（活跃窗仅 07:00–23:00，须含 sleep）
 
 阶段切分（注册日起算 day_index，从 1 开始）:
-  Day1-3   身份塑造 · 社交种子
+  Day1     专项：加 1 好友 + 关注 2 行业公众号 + 读文 10 分钟并留言
+  Day2-3   身份塑造 · 社交种子（加好友节奏 2/2 + 轻浏览）
   Day4-7   内容生态
   Day8-10  深度互动
   Day11-14 场景渗透
@@ -92,22 +93,50 @@ def _day1_3_add_friend_count(day_index: int) -> int:
     return int(DAY1_3_ADD_FRIEND_SCHEDULE.get(max(1, int(day_index)), 0))
 
 
-def _day1_3(day_index: int, is_weekend: bool) -> list[Action]:
-    """社交种子：加高粘性好友、关注公众号、读文 10 分钟。"""
+def _day1(is_weekend: bool) -> list[Action]:
+    """
+    Day1 专项：
+      1. 添加 1 个种子好友
+      2. 关注 2 个行业相关公众号
+      3. 阅读公众号推文约 10 分钟并留言
+    """
     morning = "08:30" if is_weekend else "07:30"
-    add_count = _day1_3_add_friend_count(day_index)
+    return [
+        Action(ActionType.OPEN_WECHAT, morning, "09:30", (180, 480)),
+        Action(ActionType.ADD_FRIEND, "09:00", "10:30", (90, 180),
+               params={"count": 1, "source": "day1_seed_friend"}),
+        Action(ActionType.FOLLOW_PUBLIC_ACCOUNT, "09:30", "11:00", (60, 180),
+               params={"count": 2, "industry_only": True}),
+        Action(ActionType.READ_ARTICLE, "11:00", "13:00", (600, 900),
+               params={
+                   "duration": 600,  # 阅读约 10 分钟
+                   "comment_rate": 1.0,  # 读完尽量留言（不因成功 1 条而停评）
+                   "require_comment": True,
+               }),
+        _sleep_action(is_weekend),
+    ]
+
+
+def _day1_3(day_index: int, is_weekend: bool) -> list[Action]:
+    """社交种子：Day1 三项专项；Day2-3 加好友+关注+读文+轻浏览。"""
+    d = max(1, int(day_index))
+    if d == 1:
+        return _day1(is_weekend)
+
+    morning = "08:30" if is_weekend else "07:30"
+    add_count = _day1_3_add_friend_count(d)
     return [
         Action(ActionType.OPEN_WECHAT, morning, "09:30", (180, 480)),
         Action(ActionType.SCROLL_MOMENTS, "08:00", "09:30", (300, 600)),
         Action(ActionType.ADD_FRIEND, "09:00", "10:30", (90, 180),
                params={
                    "count": add_count,
-                   "source": f"day{min(max(1, int(day_index)), 3)}_seed_friend",
+                   "source": f"day{min(d, 3)}_seed_friend",
                }),
         Action(ActionType.FOLLOW_PUBLIC_ACCOUNT, "09:30", "11:00", (60, 180),
-               params={"count": 2}),
+               params={"count": 2, "industry_only": True}),
         Action(ActionType.READ_ARTICLE, "11:30", "13:00", (600, 900),
-               params={"duration": 600}),
+               params={"duration": 600, "comment_rate": 0.4}),
         Action(ActionType.FAVORITE_ARTICLE, "12:30", "13:30", (30, 120)),
         # 每日视频号约 10 分钟完播（新号前期不评论）
         Action(ActionType.SCROLL_CHANNELS, "13:30", "15:00", (600, 720),
