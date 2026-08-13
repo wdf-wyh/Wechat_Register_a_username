@@ -384,9 +384,19 @@ class LLMClient:
         text = self._call_api(prompt, temperature=0.85, max_tokens=200)
         return self._ensure_variety(text, persona)
 
-    def classify_moment_thumbnail(self, jpeg_bytes: bytes) -> dict:
+    def classify_moment_thumbnail(
+        self,
+        jpeg_bytes: bytes,
+        preferred_categories: list[str] | None = None,
+        topic: str = "日常",
+    ) -> dict:
         """
         判断相册缩略图是否适合作为朋友圈配图。
+
+        Args:
+            jpeg_bytes: 缩略图 JPEG
+            preferred_categories: 本次发圈偏好类别（如 美食/旅行/日常）
+            topic: 发圈主题，用于引导分类侧重点
 
         Returns:
             {suitable, category, description, reject_reason}
@@ -407,21 +417,46 @@ class LLMClient:
         if not client:
             return fallback
 
+        prefs = preferred_categories or ["日常", "美食", "旅行", "风景"]
+        pref_text = "、".join(prefs)
         b64 = base64.b64encode(jpeg_bytes).decode("ascii")
-        prompt = """判断这张手机相册缩略图是否适合发微信朋友圈。
+        prompt = f"""判断这张手机相册缩略图是否适合发微信朋友圈。
+
+本次发圈主题：{topic or "日常"}
+优先想发的内容类型：{pref_text}
+
+重要说明：
+- 图源是微信相册网格裁剪，右上角未选中的空心圆是相册勾选控件，不算系统界面
+- 不要因为有勾选圆、网格边框就判 suitable=false
+- 若画面上下拼接了两种内容（例如上半美食、下半聊天列表），一律 suitable=false
+- 聊天列表、桌面图标墙、纯截图即使局部有食物色块，也一律 suitable=false
 
 不适合（suitable=false）：
-- 聊天/朋友圈/网页截图
+- 聊天/朋友圈/网页截图（整屏 UI 列表）
+- 画面中同时出现「食物特写 + 聊天/桌面/系统列表」的串图
 - 二维码、条形码、付款码
-- 证件、银行卡、发票
-- 黑屏、白屏、严重模糊
-- 系统界面、弹窗、验证码、广告
+- 证件、银行卡、发票、营业执照
+- 黑屏、白屏、严重模糊到无法辨认主体
+- 纯桌面图标墙、文件夹图标墙（不是照片）
+- 纯奢侈品 logo/首饰特写且无生活场景（除非主题就是自拍/穿搭）
 
-适合（suitable=true）：
-- 风景、美食、宠物、自拍、日常、旅行、活动
+适合（suitable=true），并按真实内容归类：
+- 美食：食物、菜品、饮料、餐厅餐桌、火锅烧烤等（优先识别）
+- 旅行：景点、旅途、行李、交通出行
+- 风景：自然风光、城市天际线、日落
+- 日常：街头、居家、工作学习、生活片段
+- 宠物：猫狗等
+- 自拍：大头照、对镜自拍、妆造特写
+- 其他：其余可发圈内容
+
+分类要求：
+- category 必须从：风景|美食|宠物|自拍|日常|旅行|其他 中选一个
+- 若画面同时有人像和场景，优先按场景归为日常/旅行/美食，不要轻易标成自拍
+- 纯侧脸/项链胸针等妆造特写才标自拍
+- description 用中文客观描述画面（10-30字）
 
 只输出 JSON，不要 markdown：
-{"suitable": true, "category": "风景|美食|宠物|自拍|日常|旅行|其他", "description": "10-30字画面描述", "reject_reason": ""}"""
+{{"suitable": true, "category": "风景|美食|宠物|自拍|日常|旅行|其他", "description": "10-30字画面描述", "reject_reason": ""}}"""
 
         messages = [
             {
@@ -1237,6 +1272,11 @@ class LLMClient:
 4. 活跃时间仅 07:00-23:00；必须包含一条 sleep；禁止凌晨频繁操作
 5. 新号前期（day1_3）以社交种子培育为主；仅可按 seed_friends/手机号名单加好友，节奏固定为 Day1=1、Day2=2、Day3=2
 5.0 Day1 专项只排三项核心：add_friend(count=1)、follow_public_account(count=2, industry_only)、read_article(duration≈600, comment_rate≥0.5)；不要额外排视频号/搜索/小程序/支付页
+5.0a Day2-3 只排三项核心：add_friend(count=2)、follow_public_account(count=2, industry_only)、read_article(duration≈600, comment_rate≥0.5, require_comment=true)
+5.0b Day4-7 只排 post_moment(topic=生活, smart_select=true) + play_mini_game(duration≈180, 不指定 game)；不要加好友/群聊/读文/视频号
+5.0c Day8-10 只排 add_friend(count=3) + deep_chat×5(duration≥320) + moments_daily_interact(target_count=20)；不要群发/发圈
+5.0d Day11 只排 scroll_channels(duration≈600, finish_watch=true, comment_rate≥0.15)
+5.0e Day12-14 维持周活跃：browse_mini_program + 适量 post_moment（生活/工作 3:2）；每周小程序约 3 次
 5.1 如果排 follow_public_account，优先 industry_public_accounts（行业相关），不要选泛新闻号，除非行业名单不足
 6. 首周加好友不得超过 3 人/天；day4_7 相位不要排 add_friend；day1_3 只能排当日上限内的 add_friend，且不得出现发圈、深聊、群聊、朋友圈点赞评论
 7. 前 14 天禁止群发（含 send_message 多目标/mass/broadcast）、禁止自动回复
@@ -1244,7 +1284,7 @@ class LLMClient:
 9. 如果 mode=consume_only 或 state=cooldown，只排浏览类（刷朋友圈/视频号/读文章/搜索/收藏/小程序/小游戏/打开支付页）；视频号 params 须 comment_rate=0
 10. 如果 recent_fails 里某动作连续失败，今天减少或避开该动作
 11. 视频号 scroll_channels 每日合计约 10 分钟：params 建议 {{"duration": 600, "finish_watch": true, "like_rate": 0.2, "comment_rate": 0.18}}（前期 day1_3 的 comment_rate 用 0）
-12. day4_7 / day11_14 可排 play_mini_game（默认跳一跳）：params 建议 {{"game": "跳一跳", "duration": 180}}
+12. day4_7 / day11_14 可排 play_mini_game：走发现→游戏→找游戏→立即玩，params 建议 {{"duration": 180}}（不要填 game，避免改走游戏名搜索）
 13. 遵守 behavior_taboos 列表中的全部禁忌
 
 ## 输出格式

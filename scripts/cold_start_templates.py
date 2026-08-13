@@ -12,16 +12,22 @@
   - 禁止凌晨频繁操作（活跃窗仅 07:00–23:00，须含 sleep）
 
 阶段切分（注册日起算 day_index，从 1 开始）:
-  Day1     专项：加 1 好友 + 关注 2 行业公众号 + 读文 10 分钟并留言
-  Day2-3   身份塑造 · 社交种子（加好友节奏 2/2 + 轻浏览）
-  Day4-7   内容生态
-  Day8-10  深度互动
-  Day11-14 场景渗透
+  Day1     加 1 好友 + 关注 2 行业公众号 + 读文 10 分钟并留言
+  Day2-3   加 2 好友 + 关注 2 行业公众号 + 读文 10 分钟并留言
+  Day4-7   发 1 条生活类朋友圈（相册原创配图）+ 官方小游戏（跳一跳）
+  Day8-10  加 3 好友 + 5 次 1v1 深聊（每次 >5 分钟）+ 朋友圈互动 20 次
+  Day11    视频号 10 分钟（完播 + 评论）
+  Day12-14 日常活跃：每周 4-6 条朋友圈（生活:工作≈3:2）、小程序 3 次/周
 """
 
 from __future__ import annotations
 
-from scripts.base_script import Action, ActionType, channels_daily_params
+from scripts.base_script import (
+    Action,
+    ActionType,
+    channels_daily_params,
+    moments_daily_params,
+)
 
 
 # 人工专属动作（AI/规则均不得排入）
@@ -71,15 +77,20 @@ def cold_start_phase(day_index: int) -> str:
 
 def build_cold_start_actions(day_index: int, is_weekend: bool = False) -> list[Action]:
     """按注册天数生成当日动作列表。"""
-    phase = cold_start_phase(day_index)
-    builders = {
-        "day1_3": _day1_3,
-        "day4_7": _day4_7,
-        "day8_10": _day8_10,
-        "day11_14": _day11_14,
-        "post_14": _post_14,
-    }
-    return builders[phase](day_index, is_weekend)
+    d = max(1, int(day_index))
+    if d == 1:
+        return _day1(is_weekend)
+    if d in (2, 3):
+        return _day2_3(d, is_weekend)
+    if 4 <= d <= 7:
+        return _day4_7(d, is_weekend)
+    if 8 <= d <= 10:
+        return _day8_10(d, is_weekend)
+    if d == 11:
+        return _day11(is_weekend)
+    if 12 <= d <= 14:
+        return _day12_14(d, is_weekend)
+    return _post_14(d, is_weekend)
 
 
 def _sleep_action(is_weekend: bool) -> Action:
@@ -117,17 +128,18 @@ def _day1(is_weekend: bool) -> list[Action]:
     ]
 
 
-def _day1_3(day_index: int, is_weekend: bool) -> list[Action]:
-    """社交种子：Day1 三项专项；Day2-3 加好友+关注+读文+轻浏览。"""
+def _day2_3(day_index: int, is_weekend: bool) -> list[Action]:
+    """
+    Day2-3 专项（与 Day1 同结构，加好友 2 位）:
+      1. 添加 2 个种子好友
+      2. 关注 2 个行业相关公众号
+      3. 阅读公众号推文约 10 分钟并留言
+    """
     d = max(1, int(day_index))
-    if d == 1:
-        return _day1(is_weekend)
-
     morning = "08:30" if is_weekend else "07:30"
     add_count = _day1_3_add_friend_count(d)
     return [
         Action(ActionType.OPEN_WECHAT, morning, "09:30", (180, 480)),
-        Action(ActionType.SCROLL_MOMENTS, "08:00", "09:30", (300, 600)),
         Action(ActionType.ADD_FRIEND, "09:00", "10:30", (90, 180),
                params={
                    "count": add_count,
@@ -135,96 +147,105 @@ def _day1_3(day_index: int, is_weekend: bool) -> list[Action]:
                }),
         Action(ActionType.FOLLOW_PUBLIC_ACCOUNT, "09:30", "11:00", (60, 180),
                params={"count": 2, "industry_only": True}),
-        Action(ActionType.READ_ARTICLE, "11:30", "13:00", (600, 900),
-               params={"duration": 600, "comment_rate": 0.4}),
-        Action(ActionType.FAVORITE_ARTICLE, "12:30", "13:30", (30, 120)),
-        # 每日视频号约 10 分钟完播（新号前期不评论）
-        Action(ActionType.SCROLL_CHANNELS, "13:30", "15:00", (600, 720),
-               params=channels_daily_params(600, comment=False)),
-        Action(ActionType.GLOBAL_SEARCH, "15:00", "16:30", (60, 180)),
-        Action(ActionType.BROWSE_MINI_PROGRAM, "16:30", "17:30", (90, 180),
-               params={"duration": 120}),
-        Action(ActionType.MAKE_PAYMENT, "17:30", "18:30", (60, 180)),
-        Action(ActionType.SCROLL_MOMENTS, "19:00", "20:30", (300, 600)),
+        Action(ActionType.READ_ARTICLE, "11:00", "13:00", (600, 900),
+               params={
+                   "duration": 600,
+                   "comment_rate": 1.0,
+                   "require_comment": True,
+               }),
         _sleep_action(is_weekend),
     ]
 
 
 def _day4_7(day_index: int, is_weekend: bool) -> list[Action]:
-    """内容生态：开始发圈、群发言、小程序。"""
+    """内容生态：发 1 条生活类朋友圈（相册原创配图）+ 官方小游戏。"""
     morning = "08:30" if is_weekend else "07:30"
     return [
         Action(ActionType.OPEN_WECHAT, morning, "09:30", (180, 480)),
-        Action(ActionType.SCROLL_MOMENTS, "08:00", "09:30", (300, 600)),
         Action(ActionType.POST_MOMENT, "10:00", "12:00", (180, 300),
-               params={"topic": "生活"}),
-        Action(ActionType.GROUP_CHAT, "11:00", "13:00", (120, 300),
-               params={"count": 3}),
-        Action(ActionType.READ_ARTICLE, "12:30", "14:00", (300, 600),
-               params={"duration": 480}),
-        Action(ActionType.SCROLL_CHANNELS, "14:00", "16:00", (600, 720),
-               params=channels_daily_params(600, comment=True, comment_rate=0.12)),
-        Action(ActionType.PLAY_MINI_GAME, "16:00", "17:30", (120, 240),
-               params={"game": "跳一跳", "duration": 180}),
-        Action(ActionType.GROUP_CHAT, "18:00", "19:30", (60, 180),
-               params={"count": 2}),
-        Action(ActionType.SCROLL_MOMENTS, "19:30", "21:00", (300, 600)),
-        Action(ActionType.LIKE_MOMENT, "20:00", "21:00", (60, 120),
-               params={"count": (2, 4)}),
+               params={
+                   "topic": "生活",
+                   "smart_select": True,
+               }),
+        Action(ActionType.PLAY_MINI_GAME, "14:00", "16:00", (120, 240),
+               params={"duration": 180}),
         _sleep_action(is_weekend),
     ]
 
 
 def _day8_10(day_index: int, is_weekend: bool) -> list[Action]:
-    """深度互动：限量加好友、深聊、朋友圈高频互动。"""
+    """深度互动：加 3 好友 + 5 次 1v1 深聊（每次 >5 分钟）+ 朋友圈互动 20 次。"""
+    morning = "08:30" if is_weekend else "07:30"
+    deep_chat_slots = [
+        ("10:00", "10:45", (300, 360)),
+        ("11:00", "11:45", (300, 360)),
+        ("13:30", "14:15", (300, 360)),
+        ("15:00", "15:45", (300, 360)),
+        ("17:00", "17:45", (300, 360)),
+    ]
+    actions: list[Action] = [
+        Action(ActionType.OPEN_WECHAT, morning, "09:30", (180, 480)),
+        Action(ActionType.ADD_FRIEND, "09:00", "10:00", (60, 120),
+               params={"count": 3, "source": f"day{int(day_index)}_deep_seed"}),
+    ]
+    for start, end, duration in deep_chat_slots:
+        actions.append(
+            Action(ActionType.DEEP_CHAT, start, end, duration,
+                   params={"duration": 320}),
+        )
+    actions.extend([
+        Action(ActionType.MOMENTS_DAILY_INTERACT, "18:30", "20:30", (600, 900),
+               params=moments_daily_params(20)),
+        _sleep_action(is_weekend),
+    ])
+    return actions
+
+
+def _day11(is_weekend: bool) -> list[Action]:
+    """Day11：视频号 10 分钟（完播 + 评论）。"""
     morning = "08:30" if is_weekend else "07:30"
     return [
         Action(ActionType.OPEN_WECHAT, morning, "09:30", (180, 480)),
-        Action(ActionType.SCROLL_MOMENTS, "08:00", "09:30", (300, 600)),
-        Action(ActionType.BROWSE_MOMENTS_INTERACT, "09:00", "11:00", (600, 900),
-               params={"duration": 600, "like_rate": 0.45}),
-        Action(ActionType.ADD_FRIEND, "10:30", "12:00", (60, 180),
-               params={"count": 2}),
-        Action(ActionType.DEEP_CHAT, "11:30", "13:30", (300, 420),
-               params={"rounds": 5, "duration": 320}),
-        Action(ActionType.SEND_MESSAGE, "14:00", "15:30", (60, 180)),
-        Action(ActionType.SCROLL_CHANNELS, "15:00", "16:30", (600, 720),
-               params=channels_daily_params(600, comment=True, comment_rate=0.15)),
-        Action(ActionType.DEEP_CHAT, "17:00", "19:00", (300, 420),
-               params={"rounds": 4, "duration": 300}),
-        Action(ActionType.LIKE_MOMENT, "19:00", "20:30", (60, 180),
-               params={"count": (4, 8)}),
-        Action(ActionType.COMMENT_MOMENT, "19:30", "21:00", (30, 120)),
-        Action(ActionType.GROUP_CHAT, "20:00", "21:30", (60, 180),
-               params={"count": 2}),
-        Action(ActionType.SCROLL_MOMENTS, "21:30", "22:30", (180, 360)),
+        Action(ActionType.SCROLL_CHANNELS, "10:00", "11:30", (600, 720),
+               params=channels_daily_params(600, comment=True, comment_rate=0.18)),
         _sleep_action(is_weekend),
     ]
 
 
-def _day11_14(day_index: int, is_weekend: bool) -> list[Action]:
-    """场景渗透：视频号加长观看+评论、小程序、继续互动。"""
+def _day12_14(day_index: int, is_weekend: bool) -> list[Action]:
+    """
+    Day12-14 日常活跃维持（周指标）:
+      - 每周 4-6 条朋友圈，生活:工作 ≈ 3:2（Day4-7 已发 4 条生活，此处补工作向）
+      - 每周小程序 3 次（Day12/13/14 各 1 次）
+    """
     morning = "08:30" if is_weekend else "07:30"
-    return [
+    d = int(day_index)
+    actions: list[Action] = [
         Action(ActionType.OPEN_WECHAT, morning, "09:30", (180, 480)),
-        Action(ActionType.SCROLL_MOMENTS, "08:00", "09:30", (300, 600)),
-        Action(ActionType.BROWSE_MOMENTS_INTERACT, "09:00", "10:30", (480, 720),
-               params={"duration": 480, "like_rate": 0.4}),
-        Action(ActionType.ADD_FRIEND, "10:30", "12:00", (60, 120),
-               params={"count": 1}),
-        Action(ActionType.DEEP_CHAT, "11:30", "13:30", (300, 420),
-               params={"rounds": 5, "duration": 320}),
-        Action(ActionType.SCROLL_CHANNELS, "13:30", "15:30", (600, 720),
-               params=channels_daily_params(600, comment=True, comment_rate=0.22)),
-        Action(ActionType.PLAY_MINI_GAME, "16:00", "17:30", (120, 240),
-               params={"game": "跳一跳", "duration": 200}),
-        Action(ActionType.POST_MOMENT, "17:30", "19:00", (180, 300),
-               params={"topic": "日常"}),
-        Action(ActionType.GROUP_CHAT, "19:00", "20:30", (90, 180),
-               params={"count": 3}),
-        Action(ActionType.MAKE_PAYMENT, "18:00", "19:00", (60, 120)),
-        _sleep_action(is_weekend),
+        Action(ActionType.BROWSE_MINI_PROGRAM, "10:00", "11:00", (90, 180),
+               params={"duration": 120}),
     ]
+    if d == 12:
+        actions.append(
+            Action(ActionType.POST_MOMENT, "11:30", "13:00", (180, 300),
+                   params={"topic": "工作", "smart_select": True}),
+        )
+    elif d == 13:
+        actions.append(
+            Action(ActionType.POST_MOMENT, "11:30", "13:00", (180, 300),
+                   params={"topic": "生活", "smart_select": True}),
+        )
+    elif d == 14:
+        actions.append(
+            Action(ActionType.POST_MOMENT, "11:30", "13:00", (180, 300),
+                   params={"topic": "工作", "smart_select": True}),
+        )
+        actions.append(
+            Action(ActionType.MOMENTS_DAILY_INTERACT, "15:00", "17:00", (480, 720),
+                   params=moments_daily_params(10)),
+        )
+    actions.append(_sleep_action(is_weekend))
+    return actions
 
 
 def _post_14(day_index: int, is_weekend: bool) -> list[Action]:
@@ -263,29 +284,29 @@ PHASE_HARD_LIMITS = {
         "add_friend": 0,
         "post_moment": 1,
         "deep_chat": 0,
-        "group_chat": 5,
-        "like_moment": 5,
-        "comment_moment": 1,
+        "group_chat": 0,
+        "like_moment": 0,
+        "comment_moment": 0,
         "mass_send": 0,
         "auto_reply": 0,
     },
     "day8_10": {
-        "add_friend": 3,  # 首周后上限，仍 ≤ WEEK1_ADD_FRIEND_CAP 语义延伸
-        "post_moment": 1,
+        "add_friend": 3,
+        "post_moment": 0,
         "deep_chat": 5,
-        "group_chat": 4,
+        "group_chat": 0,
         "like_moment": 20,
-        "comment_moment": 8,
+        "comment_moment": 0,
         "mass_send": 0,
         "auto_reply": 0,
     },
     "day11_14": {
-        "add_friend": 2,
+        "add_friend": 0,
         "post_moment": 1,
-        "deep_chat": 4,
-        "group_chat": 4,
-        "like_moment": 15,
-        "comment_moment": 6,
+        "deep_chat": 0,
+        "group_chat": 0,
+        "like_moment": 10,
+        "comment_moment": 0,
         "mass_send": 0,
         "auto_reply": 0,
     },

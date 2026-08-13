@@ -392,7 +392,7 @@ class PublicAccountBrowser:
     def _title_match_score(expected: str, haystack: str) -> float:
         """
         列表 OCR 标题 vs 文章页 OCR 的匹配分（0~1）。
-        OCR 常截断/漏字，用最长连续子串占比。
+        WebView 字体易漏字/错字，除最长连续子串外再用 n-gram 覆盖率兜底。
         """
         a = PublicAccountBrowser._title_fingerprint(expected)
         b = PublicAccountBrowser._title_fingerprint(haystack)
@@ -400,9 +400,10 @@ class PublicAccountBrowser:
             return 0.0
         if a in b or b in a:
             return 1.0
-        min_chunk = min(6, len(a))
+        min_chunk = min(4, len(a))
         if len(a) < min_chunk:
             return 1.0 if a in b else 0.0
+
         best = 0
         # 从长到短找连续命中，避免短碎片误匹配
         for n in range(len(a), min_chunk - 1, -1):
@@ -410,9 +411,34 @@ class PublicAccountBrowser:
                 if a[i : i + n] in b:
                     best = max(best, n)
                     break
-            if best:
+            if best >= max(6, len(a) // 2):
                 break
-        return best / len(a)
+        contig = best / len(a)
+
+        # n-gram 覆盖：列表截断标题 vs 正文顶栏 OCR 常见「隔字漏识」
+        gram = 4 if len(a) >= 8 else 3
+        total = max(1, len(a) - gram + 1)
+        hits = sum(1 for i in range(total) if a[i : i + gram] in b)
+        coverage = hits / total
+        return max(contig, coverage)
+
+    def _page_matches_title(self, title: str) -> bool:
+        """打开后核对文章页是否出现目标标题（允许 OCR 截断/大图顶栏下移）。"""
+        # 封面大图时标题常落在中上部，单扫 0.42 易漏
+        regions = (
+            (0.04, 0.42),
+            (0.04, 0.58),
+            (0.08, 0.72),
+            (0.04, 0.88),
+        )
+        best = 0.0
+        for y0, y1 in regions:
+            blob = self._ocr_screen_blob(y0, y1)
+            best = max(best, self._title_match_score(title, blob))
+            if best >= 0.36:
+                return True
+        return best >= 0.30
+
 
     def _title_already_read(self, title: str) -> bool:
         key = self._title_fingerprint(title)
@@ -708,15 +734,6 @@ class PublicAccountBrowser:
         """列表中部内容指纹，用于判断点击后页面是否变化。"""
         return self._title_fingerprint(self._ocr_screen_blob(0.14, 0.78))[:96]
 
-    def _page_matches_title(self, title: str) -> bool:
-        """打开后核对文章页是否出现目标标题（允许 OCR 截断）。"""
-        top = self._ocr_screen_blob(0.04, 0.42)
-        score = self._title_match_score(title, top)
-        if score >= 0.42:
-            return True
-        wider = self._ocr_screen_blob(0.04, 0.65)
-        return self._title_match_score(title, wider) >= 0.55
-
     def _ensure_on_feed_list(self, max_backs: int = 4) -> bool:
         """确保回到可点选文章的列表页，避免在正文里 OCR 到「相关阅读」当新文章。"""
         d = self.d
@@ -821,8 +838,25 @@ class PublicAccountBrowser:
             return False
 
         if not self._page_matches_title(title):
+            # WebView 晚渲染：再等一次复检
+            time.sleep(0.9)
+            if self._page_matches_title(title):
+                logger.debug(f"[{self.account_id}] 复检标题命中: '{title[:20]}'")
+                return True
+            # 已离开列表且像正文：列表 OCR 与文章页 OCR 常对不齐，
+            # 勿当成「仍是上一篇」强退（用户可见已进正确文章却被 back）。
+            left_feed = not self._is_on_article_feed()
+            looks_article = self._looks_like_article_page()
+            body_len = len(
+                self._title_fingerprint(self._ocr_screen_blob(0.08, 0.72))
+            )
+            if left_feed and (looks_article or body_len > 40):
+                logger.info(
+                    f"[{self.account_id}] 已进正文但标题OCR未对齐，仍阅读: '{title[:20]}'"
+                )
+                return True
             logger.warning(
-                f"[{self.account_id}] 打开后标题不匹配(仍可能是上一篇): '{title[:20]}'"
+                f"[{self.account_id}] 打开后标题OCR未命中，返回列表: '{title[:20]}'"
             )
             self._mark_title_open_failed(title)
             d.press("back")
@@ -896,9 +930,9 @@ class PublicAccountBrowser:
                 )
                 self._dismiss_image_viewer_if_any()
                 if not self._is_comment_entry_visible():
-                    # 评论前必须滚到留言区；适当加大上限，pause 缩短加快找底
+                    # 评论前必须滚到留言区；长文加大上限，pause 缩短加快找底
                     self._scroll_to_article_bottom(
-                        max_scrolls=18,
+                        max_scrolls=28,
                         min_scrolls=2,
                         pause_range=(0.8, 1.8),
                     )
@@ -1122,9 +1156,12 @@ class PublicAccountBrowser:
         time.sleep(0.08)
 
     def _find_pa_comment_send_green(
-        self, y_min: float = 0.68, y_max: float = 0.96, x_min: float = 0.55
+        self, y_min: float = 0.68, y_max: float = 0.96, x_min: float = 0.78
     ):
-        """留言区输入栏右侧微信绿「发送」（有正文后由灰变绿）。"""
+        """留言输入栏最右侧微信绿「发送」（有正文后由灰变绿）。
+
+        只认右缘小胶囊，禁止用「最大绿块」——正文配图/点赞会误点。
+        """
         try:
             shot = self.d.screenshot(format="opencv")
             if shot is None:
@@ -1133,7 +1170,7 @@ class PublicAccountBrowser:
             hsv = cv2.cvtColor(shot, cv2.COLOR_BGR2HSV)
             mask = cv2.inRange(hsv, np.array([35, 60, 60]), np.array([95, 255, 255]))
             y0, y1 = int(h * y_min), int(h * y_max)
-            x0 = int(w * x_min)
+            x0 = int(w * max(0.72, x_min))
             mask[:y0, :] = 0
             mask[y1:, :] = 0
             mask[:, :x0] = 0
@@ -1141,23 +1178,35 @@ class PublicAccountBrowser:
                 mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
             )
             best = None
-            min_area = w * h * 0.0005
-            max_area = w * h * 0.05
+            min_area = w * h * 0.00035
+            max_area = w * h * 0.012
             for c in contours:
                 x, y, bw, bh = cv2.boundingRect(c)
                 area = bw * bh
                 if area < min_area or area > max_area:
                     continue
-                if bw < 18 or bh < 16:
+                if bw < 28 or bh < 18:
                     continue
-                if bw > w * 0.40 or bh > h * 0.12:
+                if bw > w * 0.22 or bh > h * 0.07:
+                    continue
+                ratio = bw / max(1, bh)
+                if ratio < 0.9 or ratio > 4.2:
                     continue
                 cx, cy = x + bw // 2, y + bh // 2
-                if best is None or area > best[0]:
-                    best = (area, cx, cy)
+                rx = cx / w
+                if rx < 0.78:
+                    continue
+                # 靠右 + 合理面积，而不是最大块
+                score = rx * 3.0 + min(area / (w * h * 0.004), 1.5)
+                if best is None or score > best[0]:
+                    best = (score, cx, cy)
             if best is None:
                 return None
-            return best[1] / w, best[2] / h
+            rx, ry = best[1] / w, best[2] / h
+            # 过贴右缘容易点出按钮
+            if rx > 0.94:
+                rx = 0.90
+            return rx, ry
         except Exception as e:
             logger.debug(f"[{self.account_id}] 公众号评论绿钮检测失败: {e}")
             return None
@@ -1186,16 +1235,16 @@ class PublicAccountBrowser:
             y_ranges.extend([(0.68, 0.96), (0.72, 0.92)])
 
         for y0, y1 in y_ranges:
-            pt = self._find_pa_comment_send_green(y0, y1)
+            pt = self._find_pa_comment_send_green(y0, y1, x_min=0.78)
             if not pt:
                 continue
             logger.info(
                 f"[{self.account_id}] 公众号评论绿钮发送 @({pt[0]:.3f},{pt[1]:.3f})"
             )
             click_ratio(d, float(pt[0]), float(pt[1]))
-            time.sleep(0.8)
+            time.sleep(0.9)
             send_triggered = True
-            if not self._is_comment_draft_still_present(draft_text):
+            if self._comment_send_confirmed(draft_text):
                 sent = True
             break
 
@@ -1206,30 +1255,32 @@ class PublicAccountBrowser:
             ok = ocr_find_and_click(
                 d,
                 self._get_ocr(),
-                ["发送", "发表", "提交"],
-                y_min_ratio=0.45,
-                y_max_ratio=0.99,
-                x_min_ratio=0.55,
+                ["发送", "发表"],
+                y_min_ratio=0.42,
+                y_max_ratio=0.88,
+                x_min_ratio=0.72,
                 x_max_ratio=0.99,
-                conf_min=0.28 if exact else 0.25,
+                conf_min=0.32 if exact else 0.28,
                 enhance=self._enhance,
                 exact=exact,
-                post_click_sleep=0.8,
+                post_click_sleep=0.9,
             )
             if ok:
-                sent = True
                 send_triggered = True
-                break
+                if self._comment_send_confirmed(draft_text):
+                    sent = True
+                    break
 
         if not sent:
-            for label in ("发送", "发表", "提交"):
+            for label in ("发送", "发表"):
                 try:
                     node = d(text=label)
                     if node.exists(timeout=0.5):
                         node.click()
-                        time.sleep(0.8)
-                        sent = True
+                        time.sleep(0.9)
                         send_triggered = True
+                        if self._comment_send_confirmed(draft_text):
+                            sent = True
                         break
                 except Exception:
                     pass
@@ -1237,9 +1288,9 @@ class PublicAccountBrowser:
         if not sent:
             try:
                 send_x = int(w * 0.90)
-                send_y = int(h * 0.88)
+                send_y = int(h * 0.62 if keyboard_up else 0.88)
                 if best_right is not None and best_center_y is not None:
-                    send_x = min(w - 1, int(best_right) + 28)
+                    send_x = min(w - 1, max(int(w * 0.82), int(best_right) + 24))
                     send_y = int(best_center_y)
                 else:
                     try:
@@ -1251,46 +1302,56 @@ class PublicAccountBrowser:
                     except Exception:
                         pass
                 d.click(send_x, send_y)
-                time.sleep(0.7)
+                time.sleep(0.9)
                 send_triggered = True
-                for label in ("发送", "发表", "提交"):
-                    try:
-                        node = d(text=label)
-                        if node.exists(timeout=0.35):
-                            node.click()
-                            time.sleep(0.7)
-                            sent = True
-                            break
-                    except Exception:
-                        pass
+                if self._comment_send_confirmed(draft_text):
+                    sent = True
                 if not sent:
-                    pt = self._find_pa_comment_send_green(0.45, 0.99)
+                    pt = self._find_pa_comment_send_green(0.42, 0.88, x_min=0.78)
                     if pt:
                         click_ratio(d, float(pt[0]), float(pt[1]))
-                        time.sleep(0.7)
+                        time.sleep(0.9)
                         send_triggered = True
-                        if not self._is_comment_draft_still_present(draft_text):
+                        if self._comment_send_confirmed(draft_text):
                             sent = True
                 if not sent:
                     ok_retry = ocr_find_and_click(
                         d,
                         self._get_ocr(),
-                        ["发送", "发表", "提交"],
-                        y_min_ratio=0.45,
-                        y_max_ratio=0.99,
-                        x_min_ratio=0.55,
+                        ["发送", "发表"],
+                        y_min_ratio=0.42,
+                        y_max_ratio=0.88,
+                        x_min_ratio=0.72,
                         x_max_ratio=0.99,
-                        conf_min=0.22,
+                        conf_min=0.28,
                         enhance=self._enhance,
-                        exact=False,
-                        post_click_sleep=0.7,
+                        exact=True,
+                        post_click_sleep=0.9,
                     )
-                    if ok_retry:
+                    if ok_retry and self._comment_send_confirmed(draft_text):
                         sent = True
             except Exception:
                 pass
 
         return send_triggered, sent
+
+    def _comment_send_confirmed(self, draft_text: str) -> bool:
+        """点击发送后必须确认输入态已关掉，禁止「OCR读不到草稿」当成功。"""
+        time.sleep(0.35)
+        if self._is_comment_draft_still_present(draft_text):
+            return False
+        # 绿发送还在 = 没点上
+        if self._green_send_visible():
+            return False
+        blob = self._ocr_region_blob(0.48, 1.0)
+        placeholder = any(
+            k in blob for k in ("写评论", "写留言", "说点什么")
+        )
+        send_word = "发送" in blob
+        # 仍停在发表面板
+        if send_word and not placeholder:
+            return False
+        return bool(placeholder)
 
     def _comment_article(
         self,
@@ -1315,10 +1376,10 @@ class PublicAccountBrowser:
         self._dismiss_image_viewer_if_any()
         self._dismiss_stale_comment_ime()
 
-        # 0) 评论前确保已滚到文末留言区（调用方应已先完成阅读，此处仅兜底）
+        # 0) 评论前确保已滚到文末留言区（调用方应已先完成阅读；长文需足够上限）
         if not self._is_comment_entry_visible():
             self._scroll_to_article_bottom(
-                max_scrolls=5, min_scrolls=2, pause_range=(1.0, 2.2)
+                max_scrolls=28, min_scrolls=2, pause_range=(0.8, 1.8)
             )
 
         # 1) 只点明确入口，禁止裸匹配「评论/留言」（易点到评论区配图）
@@ -1576,8 +1637,10 @@ class PublicAccountBrowser:
             pass
 
         draft_remains = self._is_comment_draft_still_present(text)
-        # 严格：必须确认发送成功（OCR/u2/坐标+草稿消失），且草稿不再残留
-        ok = bool(sent and (not draft_remains))
+        # 严格：点过发送不够，必须确认输入态已关闭且草稿不在输入框
+        ok = bool(sent) and self._comment_send_confirmed(text)
+        if not ok:
+            sent = False
         logger.debug(
             f"[{self.account_id}] 公众号评论结果: {ok} "
             f"(send_triggered={send_triggered}, sent={sent}, "
@@ -1597,9 +1660,9 @@ class PublicAccountBrowser:
             else [(0.68, 0.96), (0.72, 0.92)]
         )
         for y0, y1 in ranges:
-            if self._find_pa_comment_send_green(y0, y1):
+            if self._find_pa_comment_send_green(y0, y1, x_min=0.78):
                 return True
-        return bool(self._find_pa_comment_send_green(0.45, 0.99, x_min=0.50))
+        return bool(self._find_pa_comment_send_green(0.42, 0.88, x_min=0.78))
 
     def _focus_comment_compose(self) -> None:
         """把焦点落到留言输入框，避免粘贴打到错误控件。"""
@@ -2054,6 +2117,13 @@ class PublicAccountBrowser:
             return False
         if sum(ch.isdigit() for ch in text) >= max(3, len(text) // 2):
             return False
+        # 正文摘句常被 OCR 当成标题：句中截断、以句号/顿号起止等
+        if text.endswith(("，", ",", "。", "、", "；", ";")):
+            return False
+        if text.startswith(("。", "，", "、", "；", "|")):
+            return False
+        if "等等" in text or "业务范围" in text:
+            return False
         return True
 
     def _is_feed_timestamp(self, text: str) -> bool:
@@ -2164,9 +2234,9 @@ class PublicAccountBrowser:
                 logger.debug(f"[{self.account_id}] 文章阅读至底部: True (分段阅读后已可见)")
                 return
             reached = self._scroll_to_article_bottom(
-                max_scrolls=12,
+                max_scrolls=24,
                 min_scrolls=2,
-                pause_range=(2.0, 5.0),
+                pause_range=(1.5, 3.5),
             )
             logger.debug(
                 f"[{self.account_id}] 文章阅读至底部: {reached}"
@@ -2189,8 +2259,7 @@ class PublicAccountBrowser:
 
     def _is_article_bottom_visible(self) -> bool:
         """OCR 判断当前是否已滚到文章底部（「留言」在上、「写留言」在下）。"""
-        # 你的反馈是：布局上「留言」在「写留言」之上。
-        # 因此不要把两者都限制在 0.52~1.0 的单一窗口里，否则会裁掉上面的「留言」。
+        # 布局上「留言」在「写留言」之上；勿裁进同一窄窗，否则会裁掉上面的「留言」。
         lower_blob = self._ocr_region_blob(0.58, 1.0)
         if _ARTICLE_BOTTOM_INPUT not in lower_blob:
             return False

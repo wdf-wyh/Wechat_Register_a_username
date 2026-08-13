@@ -26,8 +26,9 @@ PROFILE = DeviceProfile(
         "scan_entry": (0.20, 0.270),
         "search_entry": (0.20, 0.340),
         # 新版发现页「游戏/小程序」在列表底部（OCR 优先）
-        "games_entry": (0.20, 0.78),
-        "mini_program_entry": (0.20, 0.85),
+        # 2026-08 实测：游戏≈0.677，小程序≈0.750；旧 0.78 会误点进小程序
+        "games_entry": (0.20, 0.677),
+        "mini_program_entry": (0.20, 0.750),
         # 聊天 / 搜索
         "search_btn": (0.90, 0.054),
         "chat_input_box": (0.50, 0.93),
@@ -110,6 +111,7 @@ PROFILE = DeviceProfile(
         "voice_press_self_x_offset": 0.10,
         "moments_camera": (0.90, 0.054),
         "moments_publish": (0.90, 0.055),
+        "moments_album_done": (0.88, 0.93),
         "moments_dots_x_ratios": (0.93, 0.91, 0.89, 0.95, 0.87),
         "moments_comment_send": (0.90, 0.93),
         "moments_comment_send_candidates": [

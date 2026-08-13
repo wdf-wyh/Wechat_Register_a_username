@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import random
+import re
 import time
 from typing import Optional
 
@@ -27,6 +28,38 @@ DEFAULT_OFFICIAL_MINI_GAMES = (
     "欢乐斗地主",
     "天天象棋",
     "羊了个羊",
+)
+
+# 小游戏内广告 / 外链跳转常见 OCR 文案
+_MINI_GAME_AD_MARKERS = (
+    "广告",
+    "跳过广告",
+    "激励视频",
+    "观看完整",
+    "完整观看",
+    "查看详情",
+    "立即下载",
+    "立即体验",
+    "去体验",
+    "进入小游戏",
+    "点我领取",
+    "秒后跳过",
+    "秒后可跳过",
+    "后可关闭",
+    "秒后关闭",
+    "残忍拒绝",
+    "放弃奖励",
+)
+
+_MINI_GAME_AD_AVOID_CLICK = (
+    "查看",
+    "下载",
+    "体验",
+    "进入",
+    "详情",
+    "领取",
+    "安装",
+    "打开应用",
 )
 
 
@@ -1232,27 +1265,46 @@ class SocialActions:
 
         新版: 「搜索 账号/手机号」「手机联系人」「企业微信联系人」「雷达」
         旧版: 「微信号/手机号」「雷达加朋友」
+        注意: OCR 常把「账号/手机号」拆成「账号」「手机号」且丢斜杠，不能只认整词。
         """
-        if self._is_plus_menu_open():
+        self._invalidate_ocr_cache()
+        blob = self._ocr_screen_blob(force=True)
+        if not blob:
             return False
-        markers_a = [
-            "账号/手机号",
-            "微信号/手机号",
-            "手机联系人",
-            "企业微信联系人",
-            "雷达加朋友",
-            "面对面建群",
-        ]
-        markers_b = [
-            "添加朋友",
-            "账号",
-            "手机号",
-            "微信号",
-            "雷达",
-            "面对面",
-            "手机联系人",
-        ]
-        return self._ocr_has_any(markers_a) and self._ocr_has_any(markers_b)
+        # + 菜单仍开着时不算已进入添加朋友页
+        if "发起群聊" in blob and "收付款" in blob:
+            return False
+
+        has_title = "添加朋友" in blob
+        has_search_hint = any(
+            k in blob
+            for k in (
+                "账号/手机号",
+                "微信号/手机号",
+                "搜索账号",
+                "搜索手机",
+            )
+        ) or (
+            ("账号" in blob or "微信号" in blob)
+            and "手机号" in blob
+        )
+        has_side = any(
+            k in blob
+            for k in (
+                "手机联系人",
+                "企业微信联系人",
+                "雷达加朋友",
+                "面对面建群",
+                "雷达",
+                "面对面",
+                "扫一扫",
+            )
+        )
+        # 标题 + (搜索框特征 或 侧栏入口) 即可
+        if has_title and (has_search_hint or has_side):
+            return True
+        # 无标题时：搜索框 + 侧栏双特征（避免误认通讯录）
+        return has_search_hint and has_side
 
     def _ensure_wechat_foreground(self) -> bool:
         """确认微信仍在前台；否则重新拉起。"""
@@ -1313,11 +1365,13 @@ class SocialActions:
             time.sleep(0.5)
             click_ratio(self.d, px, py)
             time.sleep(0.8)
+            self._invalidate_ocr_cache()
 
             # 1) 坐标优先（红米实测 添加朋友 @0.78,0.197）
             for mx, my in menu_candidates:
                 click_ratio(self.d, float(mx), float(my))
                 time.sleep(1.2)
+                self._invalidate_ocr_cache()
                 if self._is_add_friend_page():
                     logger.info(
                         f"[{self.account_id}] 坐标进入添加朋友页 "
@@ -1326,12 +1380,31 @@ class SocialActions:
                     return True
                 if self._is_plus_menu_open():
                     continue
+                # 已离开 + 菜单：多数是点进了添加朋友页但 OCR 偶发漏字。
+                # 禁止立刻 back（用户可见「打开搜索页又返回」）；再判一次后仍不像才退。
+                time.sleep(0.4)
+                self._invalidate_ocr_cache()
+                if self._is_add_friend_page():
+                    logger.info(
+                        f"[{self.account_id}] 二次确认进入添加朋友页 "
+                        f"plus=({px:.2f},{py:.2f}) item=({mx},{my})"
+                    )
+                    return True
+                blob = self._ocr_screen_blob(force=True)
+                # 标题已在，视为成功，交给后续输入逻辑点搜索框
+                if blob and "添加朋友" in blob and "发起群聊" not in blob:
+                    logger.info(
+                        f"[{self.account_id}] 标题命中添加朋友页，跳过 back "
+                        f"item=({mx},{my})"
+                    )
+                    return True
                 self.d.press("back")
                 time.sleep(0.4)
                 if not self._ensure_wechat_foreground():
                     return False
                 click_ratio(self.d, px, py)
                 time.sleep(0.7)
+                self._invalidate_ocr_cache()
 
             # 2) OCR 点右侧「添加朋友」
             if self._ocr_click_right(
@@ -1341,8 +1414,13 @@ class SocialActions:
                 x_min=0.55,
             ):
                 time.sleep(1.2)
+                self._invalidate_ocr_cache()
                 if self._is_add_friend_page():
                     logger.info(f"[{self.account_id}] OCR 进入添加朋友页")
+                    return True
+                blob = self._ocr_screen_blob(force=True)
+                if blob and "添加朋友" in blob and "发起群聊" not in blob:
+                    logger.info(f"[{self.account_id}] OCR 后标题命中添加朋友页")
                     return True
 
             self.d.press("back")
@@ -1794,10 +1872,14 @@ class SocialActions:
         微信首页 → 发现 → 游戏 → 顶栏找游戏 → 点「立即玩」。
         若立即玩失败且传入 game_name，再尝试搜索该游戏。
         """
+        from utils.image_utils import save_debug_screenshot
+
         self._prepare_wechat_home_no_capsule()
         goto_tab(self.d, "discover")
         time.sleep(1.0)
         self._dismiss_plus_menu_if_open()
+        disc = self._ocr_screen_blob(force=True)
+        logger.info(f"[{self.account_id}] 发现页 OCR: {disc[:180]}")
 
         if not self._open_discover_list_entry(
             keywords=["游戏"],
@@ -1806,9 +1888,13 @@ class SocialActions:
             # 勿用「在玩/小游戏」：会误匹配「已玩游戏」等游戏人生文案
             success_markers=("找游戏",),
         ):
+            logger.warning(f"[{self.account_id}] 发现页未点到「游戏」入口")
+            save_debug_screenshot(self.d, self.account_id, "game_no_games_entry")
             return False
         time.sleep(2.0)
-        if not self._looks_like_games_center():
+        after = self._ocr_screen_blob(force=True)
+        logger.info(f"[{self.account_id}] 点游戏后 OCR: {after[:180]}")
+        if not self._looks_like_games_center(after):
             # 可能误进游戏人生：退后重试一次发现→游戏
             logger.info(f"[{self.account_id}] 未进入游戏中心顶栏，尝试退出后重进")
             self.d.press("back")
@@ -1821,20 +1907,32 @@ class SocialActions:
                 fallback=(0.32, 0.78),
                 success_markers=("找游戏",),
             ):
+                save_debug_screenshot(self.d, self.account_id, "game_no_games_entry")
                 return False
             time.sleep(1.5)
-            if not self._looks_like_games_center():
+            after = self._ocr_screen_blob(force=True)
+            logger.info(f"[{self.account_id}] 重进游戏后 OCR: {after[:180]}")
+            if not self._looks_like_games_center(after):
+                save_debug_screenshot(self.d, self.account_id, "game_not_center")
                 return False
 
         # 必须进顶栏「找游戏」，不能只靠圈子页右下角悬浮「立即玩」
         if not self._switch_to_find_games_tab():
-            logger.warning(f"[{self.account_id}] 未能切换到「找游戏」Tab")
+            blob = self._ocr_screen_blob(force=True)
+            logger.warning(
+                f"[{self.account_id}] 未能切换到「找游戏」Tab OCR: {blob[:180]}"
+            )
+            save_debug_screenshot(self.d, self.account_id, "game_no_find_tab")
             return False
         time.sleep(1.0)
+        listed = self._ocr_screen_blob(force=True)
+        logger.info(f"[{self.account_id}] 找游戏列表 OCR: {listed[:180]}")
 
         if self._click_play_now_any():
             return True
 
+        logger.warning(f"[{self.account_id}] 找游戏列表未点到「立即玩」")
+        save_debug_screenshot(self.d, self.account_id, "game_no_play_now")
         if game_name:
             if self._search_and_launch_game(game_name):
                 return True
@@ -1845,12 +1943,20 @@ class SocialActions:
         """游戏中心顶栏：朋友 / 圈子 / 找游戏 → 切到找游戏。"""
         for attempt in range(4):
             if attempt < 3:
-                self._ocr_click_any(["找游戏"], y_min=0.03, y_max=0.20)
+                clicked = self._ocr_click_any(["找游戏"], y_min=0.03, y_max=0.20)
+                logger.info(
+                    f"[{self.account_id}] 点顶栏找游戏 attempt={attempt + 1} clicked={clicked}"
+                )
             else:
                 # 顶栏右侧「找游戏」坐标兜底
                 click_ratio(self.d, 0.72, 0.08)
+                logger.info(f"[{self.account_id}] 找游戏顶栏坐标兜底 @(0.72,0.08)")
             time.sleep(1.1)
             blob = self._ocr_screen_blob(force=True)
+            logger.info(
+                f"[{self.account_id}] 找游戏Tab判定={self._on_find_games_list(blob)} "
+                f"OCR: {blob[:160]}"
+            )
             if self._on_find_games_list(blob):
                 return True
         return False
@@ -1874,7 +1980,7 @@ class SocialActions:
 
     def _click_play_now_any(self) -> bool:
         """在找游戏列表里点「立即玩」（避开右下角悬浮条），必要时下滑翻页。"""
-        for _ in range(6):
+        for i in range(6):
             # 列表行内按钮偏右；悬浮条多在 y>0.85，故限制 y_max
             if self._ocr_click_any_boxed(
                 ["立即玩"],
@@ -1883,9 +1989,19 @@ class SocialActions:
                 x_min=0.40,
                 x_max=0.96,
             ):
+                logger.info(f"[{self.account_id}] 已点「立即玩」 swipe={i}")
                 time.sleep(2.8)
+                # 开局常有广告/隐私层：先关广告再判定可玩
+                if self._is_mini_game_ad_overlay():
+                    logger.info(f"[{self.account_id}] 开局广告层，尝试关闭")
+                    self._dismiss_mini_game_ad()
+                    time.sleep(1.0)
                 if self._ensure_game_playable():
                     return True
+                blob = self._ocr_screen_blob(force=True)
+                logger.warning(
+                    f"[{self.account_id}] 点立即玩后未进入可玩界面 OCR: {blob[:160]}"
+                )
                 self._ocr_click_any_boxed(
                     ["立即玩", "开始游戏", "进入游戏"],
                     y_min=0.55,
@@ -1894,14 +2010,24 @@ class SocialActions:
                     x_max=0.95,
                 )
                 time.sleep(2.0)
+                if self._is_mini_game_ad_overlay():
+                    self._dismiss_mini_game_ad()
+                    time.sleep(0.8)
                 if self._ensure_game_playable():
                     return True
                 if self._is_privacy_or_policy_page():
                     self.d.press("back")
                     time.sleep(0.6)
-                self._exit_nested(times=2)
-                time.sleep(0.6)
-                self._switch_to_find_games_tab()
+                # 若已退回发现页，勿空点「找游戏」；换下一页/重进由上层处理
+                blob2 = self._ocr_screen_blob(force=True)
+                if "朋友圈" in blob2 and "视频号" in blob2:
+                    logger.warning(f"[{self.account_id}] 已退回发现页，停止本轮立即玩")
+                    return False
+                if self._looks_like_games_center(blob2) or self._on_find_games_list(blob2):
+                    self._switch_to_find_games_tab()
+                else:
+                    self._exit_nested(times=1)
+                    time.sleep(0.5)
             self.d.swipe(
                 int(self.w * 0.55),
                 int(self.h * 0.75),
@@ -2115,11 +2241,9 @@ class SocialActions:
         )
         if any(p and p in blob for p in positive):
             return True
-        # 负向：明显非游戏运行页
+        # 负向：明显非游戏运行页（详情页底部「隐私保护指引」不算）
         negative = (
             "你的权益",
-            "隐私保护",
-            "隐私政策",
             "发起群聊",
             "通讯录",
             "收付款",
@@ -2127,6 +2251,10 @@ class SocialActions:
             "视频号",
         )
         if any(k in blob for k in negative):
+            return False
+        if ("隐私保护" in blob or "隐私政策" in blob) and not any(
+            k in blob for k in ("游戏介绍", "立即玩", "开始游戏", "找游戏")
+        ):
             return False
         # 已离开游戏中心导航，且无明显非游戏文案 → 视为已进入
         if not any(k in blob for k in ("找游戏", "在玩", "今日精选", "更多圈子")):
@@ -2152,6 +2280,12 @@ class SocialActions:
         if "小程序隐私保护" in text:
             if any(k in text for k in ("同意并继续", "允许", "拒绝", "不同意")):
                 # 弹层链接文案也含「小程序隐私保护指引」
+                return False
+            # 游戏详情页底部常有「小程序隐私保护指引」链接，不是全文
+            if any(
+                k in text
+                for k in ("游戏介绍", "立即玩", "开始游戏", "找游戏", "权限", "功能")
+            ):
                 return False
             return True
         if "隐私政策" in text and "同意并继续" not in text and "允许" not in text:
@@ -2242,10 +2376,33 @@ class SocialActions:
         for _ in range(8):
             blob = self._ocr_screen_blob(force=True)
 
+            if self._is_mini_game_ad_overlay(blob):
+                logger.info(f"[{self.account_id}] 可玩判定前关闭广告层")
+                self._dismiss_mini_game_ad()
+                time.sleep(0.8)
+                continue
+
             if self._is_privacy_or_policy_page(blob):
-                logger.info(f"[{self.account_id}] 检测到隐私全文页，返回")
+                logger.info(
+                    f"[{self.account_id}] 检测到隐私全文页，返回 OCR: {blob[:120]}"
+                )
                 self.d.press("back")
                 time.sleep(0.8)
+                continue
+
+            # 点立即玩后可能先落到游戏详情（开发者/权限/游戏介绍）
+            if any(k in blob for k in ("游戏介绍",)) or (
+                "立即玩" in blob and "权限" in blob and "找游戏" not in blob
+            ):
+                logger.info(f"[{self.account_id}] 游戏详情页，继续点立即玩")
+                self._ocr_click_any_boxed(
+                    ["立即玩", "开始游戏", "进入游戏"],
+                    y_min=0.55,
+                    y_max=0.96,
+                    x_min=0.20,
+                    x_max=0.95,
+                )
+                time.sleep(2.2)
                 continue
 
             if self._is_privacy_consent_dialog(blob):
@@ -2377,8 +2534,159 @@ class SocialActions:
                 return
             break
 
+    def _is_mini_game_ad_overlay(self, blob: str = "") -> bool:
+        """是否处于小游戏内广告层（含倒计时跳过）。"""
+        text = blob or self._ocr_screen_blob()
+        if any(k in text for k in _MINI_GAME_AD_MARKERS):
+            return True
+        if "跳过" in text and ("秒" in text or "广告" in text):
+            return True
+        return False
+
+    def _is_left_mini_game(self, blob: str = "") -> bool:
+        """误点广告后已离开可玩界面（微信主界面/发现/游戏中心/外链）。"""
+        text = blob or self._ocr_screen_blob(force=True)
+        try:
+            pkg = str((self.d.app_current() or {}).get("package", "") or "")
+            if pkg and pkg != "com.tencent.mm":
+                return True
+        except Exception:
+            pass
+        if self._is_wechat_main_tabs(text) or self._looks_like_chat_list(text):
+            return True
+        if "朋友圈" in text and "视频号" in text and "发现" in text:
+            return True
+        if self._looks_like_games_center(text) or self._is_game_life_page(text):
+            return True
+        if any(
+            k in text
+            for k in ("应用商店", "立即安装", "打开应用", "前往下载", "淘宝", "京东")
+        ):
+            return True
+        return False
+
+    def _dismiss_mini_game_ad(self) -> bool:
+        """关闭/跳过广告层，避免点到广告本体。"""
+        for keys, y_min, y_max, x_min, x_max in (
+            (["跳过广告", "跳过"], 0.03, 0.22, 0.55, 0.98),
+            (["关闭", "立即关闭"], 0.03, 0.25, 0.70, 0.98),
+            (["返回游戏", "继续游戏", "继续玩"], 0.45, 0.95, 0.15, 0.85),
+            (["残忍", "放弃奖励", "放弃"], 0.55, 0.92, 0.05, 0.45),
+            (["我知道了", "知道了"], 0.50, 0.92, 0.20, 0.85),
+        ):
+            if self._ocr_click_any_boxed(
+                keys,
+                y_min=y_min,
+                y_max=y_max,
+                x_min=x_min,
+                x_max=x_max,
+                avoid_substrings=_MINI_GAME_AD_AVOID_CLICK,
+            ):
+                return True
+        # 常见右上角 X
+        for rx, ry in ((0.93, 0.06), (0.95, 0.05), (0.88, 0.08)):
+            self._adb_tap(int(self.w * rx), int(self.h * ry))
+            time.sleep(0.55)
+            if not self._is_mini_game_ad_overlay():
+                return True
+        return False
+
+    def _recover_mini_game_play(self) -> bool:
+        """从广告外链/误跳转恢复到小游戏。"""
+        logger.info(f"[{self.account_id}] 尝试从广告跳转恢复到小游戏")
+        for i in range(10):
+            blob = self._ocr_screen_blob(force=True)
+            try:
+                cur = self.d.app_current() or {}
+                pkg = str(cur.get("package", "") or "")
+                act = str(cur.get("activity", "") or "")
+            except Exception:
+                pkg, act = "", ""
+            logger.info(
+                f"[{self.account_id}] 广告恢复 step={i + 1} pkg={pkg} "
+                f"act={act} OCR: {blob[:140]}"
+            )
+
+            if self._is_mini_game_ad_overlay(blob):
+                self._dismiss_mini_game_ad()
+                time.sleep(0.8)
+                continue
+
+            # 已回到可玩界面
+            if not self._is_left_mini_game(blob):
+                self._dismiss_game_overlays()
+                if self._ensure_game_playable():
+                    logger.info(f"[{self.account_id}] 已恢复到小游戏")
+                    return True
+
+            # 外链 App → 拉回微信
+            if pkg and pkg != "com.tencent.mm":
+                start_wechat(self.d, wait=2.0, cold=False)
+                time.sleep(1.0)
+                continue
+
+            # 落回游戏中心/找游戏列表 → 再点立即玩
+            if self._looks_like_games_center(blob) or self._on_find_games_list(blob):
+                if not self._on_find_games_list(blob):
+                    self._switch_to_find_games_tab()
+                    time.sleep(0.8)
+                if self._click_play_now_any():
+                    logger.info(f"[{self.account_id}] 游戏中心重新进入小游戏")
+                    return True
+                continue
+
+            # 发现页 → 重新走游戏入口
+            if "朋友圈" in blob and "视频号" in blob:
+                if self._open_via_games_center(""):
+                    logger.info(f"[{self.account_id}] 发现页重新打开小游戏")
+                    return True
+                continue
+
+            self.d.press("back")
+            time.sleep(0.7)
+
+        logger.warning(f"[{self.account_id}] 广告跳转恢复失败")
+        return False
+
+    def _guard_mini_game_play(self) -> bool:
+        """
+        每轮游玩前：处理广告层 / 误跳转 / 隐私弹层。
+        True=可继续操作，False=无法恢复。
+        """
+        blob = self._ocr_screen_blob(force=True)
+
+        if self._is_left_mini_game(blob):
+            return self._recover_mini_game_play()
+
+        if self._is_mini_game_ad_overlay(blob):
+            logger.info(f"[{self.account_id}] 检测到广告层，尝试关闭")
+            if self._dismiss_mini_game_ad():
+                time.sleep(random.uniform(0.6, 1.2))
+                return True
+            # 倒计时广告：等待后再跳，避免乱点进广告
+            if "秒" in blob and "跳过" in blob:
+                time.sleep(2.5)
+                self._dismiss_mini_game_ad()
+                return True
+            self._adb_tap(int(self.w * 0.93), int(self.h * 0.06))
+            time.sleep(0.8)
+            return True
+
+        if (
+            self._is_privacy_or_policy_page(blob)
+            or self._is_privacy_consent_dialog(blob)
+            or self._is_game_life_auth_page(blob)
+        ):
+            return self._ensure_game_playable()
+
+        return True
+
     def _dismiss_game_overlays(self) -> None:
-        """关闭开局弹层 / 权限 / 引导。同意类只点下半屏按钮，避免点进隐私链接。"""
+        """关闭开局弹层 / 权限 / 引导 / 广告。同意类只点下半屏按钮，避免点进隐私链接。"""
+        if self._is_mini_game_ad_overlay():
+            if self._dismiss_mini_game_ad():
+                time.sleep(0.6)
+                return
         for _ in range(3):
             blob = self._ocr_screen_blob(force=True)
             if self._is_privacy_or_policy_page(blob):
@@ -2394,6 +2702,7 @@ class SocialActions:
                         "开始游戏",
                         "我知道了",
                         "跳过",
+                        "跳过广告",
                         "关闭",
                         "确认",
                         "暂不展示",
@@ -2422,18 +2731,15 @@ class SocialActions:
         logger.info(f"[{self.account_id}] 跳一跳拟人游玩中…")
         jumps = 0
         while time.time() < end_ts:
-            if jumps == 0 or jumps % 3 == 0:
-                blob = self._ocr_screen_blob(force=True)
-                if self._is_privacy_or_policy_page(blob) or self._is_privacy_consent_dialog(
-                    blob
-                ):
-                    if not self._ensure_game_playable():
-                        logger.warning(
-                            f"[{self.account_id}] 跳一跳中误入隐私页，提前结束"
-                        )
-                        return
+            if not self._guard_mini_game_play():
+                logger.warning(f"[{self.account_id}] 跳一跳中无法从广告/外链恢复，提前结束")
+                return
+            if self._is_mini_game_ad_overlay():
+                time.sleep(random.uniform(0.8, 1.5))
+                continue
+            jumps += 1
             # 结束后重新开局
-            if jumps > 0 and jumps % random.randint(6, 12) == 0:
+            if jumps > 1 and jumps % random.randint(6, 12) == 0:
                 self._ocr_click_any(
                     ["再玩一次", "重新开始", "再来一局", "开始游戏"],
                     y_min=0.40,
@@ -2462,43 +2768,63 @@ class SocialActions:
         tick = 0
         while time.time() < end_ts:
             tick += 1
-            if tick == 1 or tick % 3 == 0:
-                blob = self._ocr_screen_blob(force=True)
-                if (
-                    self._is_privacy_or_policy_page(blob)
-                    or self._is_privacy_consent_dialog(blob)
-                    or self._is_game_life_auth_page(blob)
-                ):
-                    if not self._ensure_game_playable():
-                        logger.warning(
-                            f"[{self.account_id}] 游玩中无法回到游戏界面，提前结束"
-                        )
-                        return
+            if not self._guard_mini_game_play():
+                logger.warning(
+                    f"[{self.account_id}] 游玩中无法从广告/外链恢复，提前结束"
+                )
+                return
+            if self._is_mini_game_ad_overlay():
+                # 有广告层时不随机点，避免误触
+                time.sleep(random.uniform(0.8, 1.5))
+                continue
             action = random.random()
-            if action < 0.55:
-                click_ratio(
-                    self.d,
-                    random.uniform(0.25, 0.75),
-                    random.uniform(0.40, 0.78),
-                )
-            elif action < 0.85:
-                self.d.swipe(
-                    int(self.w * random.uniform(0.3, 0.7)),
-                    int(self.h * random.uniform(0.45, 0.7)),
-                    int(self.w * random.uniform(0.3, 0.7)),
-                    int(self.h * random.uniform(0.3, 0.55)),
-                    duration=random.uniform(0.15, 0.4),
-                )
-            else:
-                self._ocr_click_any_boxed(
-                    ["继续", "再来一局", "再玩一次", "确定"],
-                    y_min=0.50,
-                    y_max=0.95,
-                    x_min=0.20,
-                    x_max=0.85,
-                    avoid_substrings=("隐私", "同意", "指引"),
-                )
+            try:
+                if action < 0.55:
+                    # 避开底部横幅与顶部贴片广告区
+                    self._adb_tap(
+                        int(self.w * random.uniform(0.35, 0.65)),
+                        int(self.h * random.uniform(0.42, 0.65)),
+                    )
+                elif action < 0.85:
+                    self._adb_swipe(
+                        int(self.w * random.uniform(0.35, 0.65)),
+                        int(self.h * random.uniform(0.48, 0.62)),
+                        int(self.w * random.uniform(0.35, 0.65)),
+                        int(self.h * random.uniform(0.38, 0.52)),
+                        duration_ms=int(random.uniform(150, 400)),
+                    )
+                else:
+                    self._ocr_click_any_boxed(
+                        ["继续", "再来一局", "再玩一次", "确定"],
+                        y_min=0.50,
+                        y_max=0.88,
+                        x_min=0.20,
+                        x_max=0.85,
+                        avoid_substrings=("隐私", "同意", "指引", "广告", "下载", "详情"),
+                    )
+            except Exception as e:
+                err = str(e)
+                if "INJECT_EVENTS" in err or "SecurityException" in err:
+                    logger.debug(f"[{self.account_id}] 小游戏注入被拒，改用等待")
+                else:
+                    logger.debug(f"[{self.account_id}] 小游戏操作跳过: {e}")
             time.sleep(random.uniform(1.2, 3.5))
+
+    def _adb_tap(self, x: int, y: int) -> None:
+        """小游戏多在独立进程，uiautomator 注入会被拒，走 adb input。"""
+        self.d.shell(f"input tap {int(x)} {int(y)}")
+
+    def _adb_swipe(
+        self,
+        x1: int,
+        y1: int,
+        x2: int,
+        y2: int,
+        duration_ms: int = 300,
+    ) -> None:
+        self.d.shell(
+            f"input swipe {int(x1)} {int(y1)} {int(x2)} {int(y2)} {int(duration_ms)}"
+        )
 
     def _hold_tap(self, x: int, y: int, hold_ms: int) -> None:
         """定长按压（跳一跳蓄力）；优先 adb swipe 同点。"""
@@ -2726,7 +3052,8 @@ class SocialActions:
             self._ocr_blob = blob
             self._ocr_blob_ts = now
             return blob
-        except Exception:
+        except Exception as e:
+            logger.warning(f"[{self.account_id}] OCR 扫屏失败: {e}")
             return self._ocr_blob or ""
 
     def _ensure_ocr(self):

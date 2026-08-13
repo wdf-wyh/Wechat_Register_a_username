@@ -94,6 +94,7 @@ PROFILE = DeviceProfile(
         "msg_send": (0.90, 0.965),
         "moments_camera": (0.83, 0.054),
         "moments_publish": (0.88, 0.056),
+        "moments_album_done": (0.88, 0.93),
         "moments_dots_x_ratios": (0.92, 0.90, 0.88, 0.94, 0.86),
         "moments_comment_send": (0.90, 0.965),
         "moments_comment_send_candidates": [

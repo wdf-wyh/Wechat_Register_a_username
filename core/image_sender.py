@@ -168,7 +168,8 @@ class ImageSender:
     # ================================================================
 
     def _select_photos(self, count: int):
-        """Canny 边缘检测 → 点击照片中心选中。"""
+        from content.moment_photo_picker import detect_album_thumbnails
+
         logger.debug(f"[{self.account_id}] 选择 {count} 张照片")
         d, w, h = self.d, self.w, self.h
 
@@ -176,22 +177,9 @@ class ImageSender:
 
         img = np.array(d.screenshot(format="pillow"))
         g = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-
-        album = g[180:int(h * 0.78), :]
-        edges = cv2.Canny(cv2.GaussianBlur(album, (5, 5), 0), 25, 80)
-        edges = cv2.dilate(edges, np.ones((4, 4), np.uint8), iterations=1)
-        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-        photos = []
-        for cnt in contours:
-            x, y, cw, ch = cv2.boundingRect(cnt)
-            ar = cw / ch if ch > 0 else 0
-            if 60 < cw < 500 and 60 < ch < 500 and 0.5 < ar < 2.0:
-                if 500 < cw * ch < 150000:
-                    photos.append({"cx": x + cw // 2, "cy": y + 180 + ch // 2})
-
-        photos.sort(key=lambda p: (p["cy"], p["cx"]))
-        logger.debug(f"[{self.account_id}] Canny: {len(photos)} 个缩略图")
+        thumbs = detect_album_thumbnails(g, h)
+        photos = [{"cx": t.cx, "cy": t.cy} for t in thumbs]
+        logger.debug(f"[{self.account_id}] 网格: {len(photos)} 个缩略图")
 
         if len(photos) < count:
             photos = [{"cx": g[0], "cy": g[1]} for g in self.PHOTO_GRID[:count]]
