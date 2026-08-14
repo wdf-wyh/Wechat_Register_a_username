@@ -154,6 +154,7 @@ class AiGodPlanner:
             "group_count": len(groups),
             "industry": self.persona.get("industry", ""),
             "seed_friends": self.persona.get("seed_friends", [])[:8],
+            "chat_friends": self.persona.get("chat_friends", [])[:8],
             "seed_groups": self.persona.get("seed_groups", [])[:5],
             "public_accounts": get_public_account_candidates(self.persona, count=8),
             "today_stats": today_stats,

@@ -235,7 +235,8 @@ print(resolve_profile(d).display_name)
 
 人设种子字段（`content/personas.py`）:
 - `public_accounts` — 关注目标
-- `seed_friends` — 可搜索添加的微信号/昵称（空则跳过加好友）
+- `seed_friends` — 可搜索添加的微信号/昵称（空则跳过加好友；申请发出即写 DB，对方未必已通过）
+- `chat_friends` — 已互为好友、供深聊的备注名/昵称（与 seed_friends 分开；空则仅用 DB 中非 seed 好友）
 - `seed_groups` — 群名（也可把群写入 DB `friends.source='group'`）
 
 ### 5.2 AI 上帝视角编排

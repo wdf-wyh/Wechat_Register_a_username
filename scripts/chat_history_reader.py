@@ -161,7 +161,7 @@ class ChatHistoryReader:
         return int(self.h * 0.905)
 
     def capture_chat_region(self) -> np.ndarray:
-        """截取聊天消息区域（BGR，与 OCR 使用同一裁剪）。"""
+        """截取聊天消息区域（灰度增强 BGR，供 EasyOCR）。"""
         y_top = self._chat_y_top()
         y_bottom = self._chat_y_bottom()
 
@@ -172,6 +172,28 @@ class ChatHistoryReader:
         enhanced = self._clahe.apply(gray)
         crop = enhanced[y_top:y_bottom, :]
         return cv2.cvtColor(crop, cv2.COLOR_GRAY2BGR)
+
+    def capture_chat_region_color(self) -> np.ndarray:
+        """截取聊天消息区域（彩色 BGR，供 Vision 识左右气泡颜色）。"""
+        y_top = self._chat_y_top()
+        y_bottom = self._chat_y_bottom()
+        img = np.array(self.d.screenshot(format="pillow"))
+        crop = img[y_top:y_bottom, :]
+        return cv2.cvtColor(crop, cv2.COLOR_RGB2BGR)
+
+    def capture_chat_jpeg(self, max_width: int = 720, quality: int = 78) -> bytes:
+        """当前聊天区彩色 JPEG（压缩后给 Vision）。"""
+        crop = self.capture_chat_region_color()
+        if crop is None or crop.size == 0:
+            return b""
+        h, w = crop.shape[:2]
+        if w > max_width:
+            scale = max_width / float(w)
+            crop = cv2.resize(crop, (max_width, int(h * scale)))
+        ok, buf = cv2.imencode(
+            ".jpg", crop, [int(cv2.IMWRITE_JPEG_QUALITY), int(quality)]
+        )
+        return buf.tobytes() if ok else b""
 
     def save_ocr_debug_crop(self, tag: str = "crop") -> str:
         """保存当前 OCR 裁剪区，便于核对是否截到最新消息。"""
@@ -200,6 +222,8 @@ class ChatHistoryReader:
         """对给定聊天区域截图做 OCR（不滚动、不重新截屏）。"""
         x_mid = int(self.w * 0.52)
         y_top = self._chat_y_top()
+        x_self_edge = int(self.w * 0.85)
+        x_friend_edge = int(self.w * 0.20)
 
         reader = self._ensure_ocr()
         raw = reader.readtext(crop_bgr)
@@ -221,7 +245,13 @@ class ChatHistoryReader:
             cy = int(sum(ys) / len(ys)) + y_top
             if self._is_chat_timestamp(t, cx):
                 continue
-            role = "self" if cx >= x_mid else "friend"
+            x_left, x_right = int(min(xs)), int(max(xs))
+            if x_right >= x_self_edge:
+                role = "self"
+            elif x_left <= x_friend_edge:
+                role = "friend"
+            else:
+                role = "self" if cx >= x_mid else "friend"
             items.append({"role": role, "text": t, "x": cx, "y": cy, "conf": conf})
 
         merged = self._merge_lines(items, contact_name=contact_name)
@@ -237,24 +267,118 @@ class ChatHistoryReader:
         return self.ocr_from_crop(crop, contact_name=contact_name)
 
     def _collect_visible_ocr(self, scroll_up: int) -> list[dict]:
-        """OCR 当前屏；若 scroll_up>0 再上滑补扫历史后回到底部。"""
-        chunks: list[dict] = list(self._ocr_chat_region())
+        """
+        OCR 当前屏；若 scroll_up>0 再上滑补扫历史后回到底部。
+
+        注意：多页结果禁止直接拼成一袋再按 y 合并——屏幕 y 在不同滚动位置
+        指向不同消息，会导致「旧外卖 + 新名片」拼成一句。请用
+        `_collect_ocr_pages` + `_stitch_ocr_pages`。
+        """
+        pages = self._collect_ocr_pages(scroll_up)
+        out: list[dict] = []
+        for page_idx, page in enumerate(pages):
+            for item in page:
+                row = dict(item)
+                row["page"] = page_idx
+                out.append(row)
+        return out
+
+    def _collect_ocr_pages(self, scroll_up: int) -> list[list[dict]]:
+        """
+        按页 OCR，返回从旧到新的页列表。
+
+        流程：先上滑若干次收集历史页，再回底部扫当前页。
+        """
+        older: list[list[dict]] = []
         if scroll_up > 0:
-            for _ in range(scroll_up):
+            for _ in range(int(scroll_up)):
                 self.scroll_up_for_history(1)
-                chunks.extend(self._ocr_chat_region())
-            self.scroll_to_bottom(times=scroll_up + 1)
-        return self._dedupe_visible(chunks)
+                older.append(self._ocr_chat_region())
+            # older[0] 是刚上滑一屏（较新），最后一页最旧
+            older.reverse()
+            self.scroll_to_bottom(times=int(scroll_up) + 1)
+            time.sleep(0.45)
+        bottom = self._ocr_chat_region()
+        return older + [bottom]
+
+    def _stitch_ocr_pages(
+        self,
+        pages: list[list[dict]],
+        contact_name: str = "",
+    ) -> list[dict]:
+        """
+        每页独立 merge_lines，再按文本去重拼成时间序（旧→新）。
+
+        同一句话在相邻两屏重复出现时只保留一次；禁止跨页按 y 拼接。
+        """
+        if not pages:
+            return []
+
+        merged_pages: list[list[dict]] = []
+        for page in pages:
+            merged = self._merge_lines(page, contact_name=contact_name)
+            merged.sort(key=lambda x: x.get("y", 0))
+            merged_pages.append(merged)
+
+        if len(merged_pages) == 1:
+            return merged_pages[0]
+
+        out: list[dict] = []
+        # role -> list of normalized texts already kept
+        kept_norms: dict[str, list[str]] = {"self": [], "friend": []}
+
+        for page in merged_pages:
+            for item in page:
+                role = str(item.get("role", "friend"))
+                text = str(item.get("text", "")).strip()
+                if not text:
+                    continue
+                nt = self._norm_transcript(text)
+                if not nt:
+                    continue
+                norms = kept_norms.setdefault(role, [])
+                skip = False
+                replace_idx = -1
+                for i, prev in enumerate(norms):
+                    if nt == prev:
+                        skip = True
+                        break
+                    # 短片段被长句覆盖 / 长句替换短片段（滚动重叠）
+                    if nt in prev and len(nt) < len(prev):
+                        skip = True
+                        break
+                    if prev in nt and len(prev) < len(nt):
+                        replace_idx = i
+                        break
+                if skip:
+                    continue
+                if replace_idx >= 0:
+                    # 用更长文本替换已有短句
+                    old_norm = norms[replace_idx]
+                    for j, existing in enumerate(out):
+                        if (
+                            existing.get("role") == role
+                            and self._norm_transcript(existing.get("text", ""))
+                            == old_norm
+                        ):
+                            out[j] = item
+                            break
+                    norms[replace_idx] = nt
+                    continue
+                norms.append(nt)
+                out.append(item)
+        return out
 
     @staticmethod
     def _dedupe_visible(items: list[dict]) -> list[dict]:
-        seen: set[tuple[str, int, str]] = set()
+        seen: set[tuple[str, int, str, int]] = set()
         out: list[dict] = []
         for item in items:
             role = item.get("role", "")
             y_bucket = int(item.get("y", 0)) // 24
             text = str(item.get("text", "")).strip()
-            key = (role, y_bucket, text)
+            page = int(item.get("page", 0))
+            key = (role, y_bucket, text, page)
             if key in seen:
                 continue
             seen.add(key)
@@ -301,9 +425,17 @@ class ChatHistoryReader:
         """
         self.scroll_to_bottom(times=1)
         time.sleep(0.4)
-        visible = self._collect_visible_ocr(scroll_up)
+        # 多页上滑曾把「旧外卖」和「新名片」按屏幕 y 错拼进同一段上下文。
+        # 深聊优先保证当前屏正确；需要更长历史时再做锚点拼接。
+        if scroll_up > 0:
+            logger.info(
+                f"[{self.account_id}] 聊天上下文仅用当前屏"
+                f"（忽略 scroll_up={scroll_up}，避免跨页串话）"
+            )
+        pages = self._collect_ocr_pages(0)
+        visible = pages[-1] if pages else []
 
-        merged_all = self._merge_lines(visible, contact_name=contact_name)
+        merged_all = self._stitch_ocr_pages(pages, contact_name=contact_name)
         merged_all = self._dedupe_scroll_ghosts(merged_all)
         merged_all.sort(key=lambda x: x.get("y", 0))
 
@@ -509,6 +641,178 @@ class ChatHistoryReader:
         for item in out:
             item.pop("y", None)
         return out
+
+    def _transcribe_voices_on_current_screen(
+        self,
+        contact_name: str = "",
+        max_voice_transcribe: int = 4,
+        transcribe_friend_only: bool = False,
+    ) -> int:
+        """
+        仅处理当前屏可见语音：转文字后灰字会出现在气泡下方，便于随后截图给 Vision。
+        返回实际发起转写的次数。
+        """
+        visible = self._ocr_chat_region()
+        merged_all = self._merge_lines(visible, contact_name=contact_name)
+        voice_bubbles = self._find_voice_bubbles(merged_all, visible, contact_name)
+        merged = [
+            item
+            for item in merged_all
+            if not self._is_chat_timestamp(item.get("text", ""), item.get("x", 0))
+        ]
+        transcript_map, _ = self._map_existing_transcripts(voice_bubbles, merged)
+        transcript_map = self._filter_invalid_transcripts(
+            transcript_map, voice_bubbles, merged
+        )
+
+        budget = max(0, int(max_voice_transcribe))
+        used = 0
+        for vb in sorted(
+            voice_bubbles,
+            key=lambda v: (
+                not v.get("bbox"),
+                not v.get("confirmed", False),
+                v.get("role") != "friend",
+                -v.get("y", 0),
+            ),
+        ):
+            if budget <= 0:
+                break
+            y_key = vb.get("y", 0)
+            role = vb.get("role", "friend")
+            bbox = vb.get("bbox")
+            if transcript_map.get(y_key):
+                continue
+            if bbox and vb.get("confirmed"):
+                live = self._ocr_transcript_below_bubble(
+                    vb.get("x", int(self.w * 0.25)),
+                    y_key,
+                    role=role,
+                    bbox=bbox,
+                )
+                if live and not self._is_invalid_transcript(
+                    live, y_key, merged, role, bbox=bbox
+                ):
+                    continue
+            if transcribe_friend_only and role != "friend":
+                continue
+            if not vb.get("confirmed", False):
+                continue
+            if not bbox or vb.get("source") != "cv":
+                continue
+            if self._has_text_message_near(merged, role, y_key, visible):
+                continue
+            if not self._voice_bubble_position_valid(
+                role, vb.get("x", 0), y_key, bbox=bbox
+            ):
+                continue
+            px, py = self._voice_press_point(
+                vb.get("x", int(self.w * 0.25)),
+                y_key,
+                role,
+                bbox=bbox,
+            )
+            transcript = self.transcribe_voice_at(
+                px, py, role=role, bbox=bbox, merged=merged
+            )
+            budget -= 1
+            used += 1
+            if transcript:
+                logger.info(
+                    f"[{self.account_id}] 当前屏语音已转写 role={role}: "
+                    f"{str(transcript)[:36]}"
+                )
+            time.sleep(random.uniform(0.4, 1.0))
+        return used
+
+    def read_messages_via_vision(
+        self,
+        contact_name: str = "",
+        scroll_up: int = 2,
+        max_voice_transcribe: int = 4,
+        transcribe_friend_only: bool = False,
+    ) -> list[dict]:
+        """
+        深聊推荐路径：当前屏/多页先转语音 → 彩色截图 → Vision 识图拼上下文。
+
+        流程：
+          1. 滑到较旧位置
+          2. 从旧到新：每页先转写可见语音，再截图
+          3. 多图交给 Vision 输出按时间排序的消息列表
+          4. Vision 不可用时回退 EasyOCR 路径
+        """
+        from content.llm_client import LLMClient
+
+        llm = LLMClient()
+        if not llm.vision_available:
+            logger.warning(
+                f"[{self.account_id}] Vision 不可用，回退 OCR 读聊天记录"
+            )
+            return self.read_messages_with_voice(
+                contact_name=contact_name,
+                scroll_up=0,
+                max_voice_transcribe=max_voice_transcribe,
+                transcribe_friend_only=transcribe_friend_only,
+            )
+
+        scroll_up = max(0, int(scroll_up))
+        self.scroll_to_bottom(times=1)
+        time.sleep(0.4)
+        if scroll_up > 0:
+            for _ in range(scroll_up):
+                self.scroll_up_for_history(1)
+            time.sleep(0.35)
+
+        total_pages = scroll_up + 1
+        budget = max(0, int(max_voice_transcribe))
+        page_jpegs: list[bytes] = []
+
+        for i in range(total_pages):
+            used = self._transcribe_voices_on_current_screen(
+                contact_name=contact_name,
+                max_voice_transcribe=budget,
+                transcribe_friend_only=transcribe_friend_only,
+            )
+            budget = max(0, budget - used)
+            # 等转写灰字渲染出来再截
+            time.sleep(0.45 if used else 0.2)
+            jpeg = self.capture_chat_jpeg()
+            if jpeg:
+                page_jpegs.append(jpeg)
+                logger.info(
+                    f"[{self.account_id}] Vision 截图页 {i + 1}/{total_pages} "
+                    f"({len(jpeg) // 1024}KB, 本页转写 {used})"
+                )
+            if i < total_pages - 1:
+                self.scroll_to_bottom(times=1)
+                time.sleep(0.45)
+
+        if not page_jpegs:
+            logger.warning(f"[{self.account_id}] Vision 截图失败，回退 OCR")
+            return self.read_messages_with_voice(
+                contact_name=contact_name,
+                scroll_up=0,
+                max_voice_transcribe=0,
+            )
+
+        history = llm.read_chat_messages_from_images(
+            page_jpegs, contact_name=contact_name
+        )
+        if not history:
+            logger.warning(
+                f"[{self.account_id}] Vision 未解析出消息，回退当前屏 OCR"
+            )
+            return self.read_messages_with_voice(
+                contact_name=contact_name,
+                scroll_up=0,
+                max_voice_transcribe=0,
+            )
+
+        logger.info(
+            f"[{self.account_id}] Vision 读聊天完成: "
+            f"{len(page_jpegs)} 页 → {len(history)} 条"
+        )
+        return history
 
     def _voice_bubble_position_valid(
         self,
@@ -1136,8 +1440,16 @@ class ChatHistoryReader:
             return True
         if len(t) <= 10 and re.search(r"(昨天|星期)", t):
             return True
+        # 8月7日中午12:39 / OCR 常把「日」认成乱码
+        if re.match(
+            r"^\d{1,2}月\d{1,2}.*?(上午|中午|下午|晚上|凌晨)?\d{1,2}[:：]\d{2}$",
+            t,
+        ):
+            return True
+        if re.match(r"^(昨天|今天).{0,4}\d{1,2}[:：]\d{2}$", t):
+            return True
         if x and int(self.w * 0.32) <= x <= int(self.w * 0.68):
-            if re.search(r"\d{1,2}[:：;]\d{2}", t) and len(t) <= 10:
+            if re.search(r"\d{1,2}[:：;]\d{2}", t) and len(t) <= 16:
                 return True
         return False
 
@@ -2058,6 +2370,10 @@ class ChatHistoryReader:
         crop = self.capture_chat_region()
         x_mid = int(self.w * 0.52)
         y_top = self._chat_y_top()
+        # 己方绿气泡右缘通常 >85%；好友白气泡左缘通常 <20%
+        # 长句会越过中线，必须先看贴边，不能看中心
+        x_self_edge = int(self.w * 0.85)
+        x_friend_edge = int(self.w * 0.20)
 
         reader = self._ensure_ocr()
         raw = reader.readtext(crop)
@@ -2079,8 +2395,24 @@ class ChatHistoryReader:
             cy = int(sum(ys) / len(ys)) + y_top
             if self._is_chat_timestamp(t, cx):
                 continue
-            role = "self" if cx >= x_mid else "friend"
-            items.append({"role": role, "text": t, "x": cx, "y": cy, "conf": conf})
+            x_left, x_right = int(min(xs)), int(max(xs))
+            if x_right >= x_self_edge:
+                role = "self"
+            elif x_left <= x_friend_edge:
+                role = "friend"
+            else:
+                role = "self" if cx >= x_mid else "friend"
+            items.append(
+                {
+                    "role": role,
+                    "text": t,
+                    "x": cx,
+                    "y": cy,
+                    "conf": conf,
+                    "x_left": x_left,
+                    "x_right": x_right,
+                }
+            )
 
         return items
 
@@ -2089,11 +2421,14 @@ class ChatHistoryReader:
         items: list[dict],
         contact_name: str = "",
     ) -> list[dict]:
-        """同一气泡/同一行的 OCR 碎片合并。"""
+        """同一气泡/同一行的 OCR 碎片合并（仅限同一 page）。"""
         if not items:
             return []
 
-        items = sorted(items, key=lambda x: (x["y"], x["x"]))
+        items = sorted(
+            items,
+            key=lambda x: (int(x.get("page", 0)), x["y"], x["x"]),
+        )
         row_tol = int(self.h * 0.025)
         merged: list[dict] = []
 
@@ -2101,8 +2436,11 @@ class ChatHistoryReader:
             text = item["text"]
             if contact_name and text == contact_name and item["y"] < self.h * 0.12:
                 continue
+            page = int(item.get("page", 0))
             placed = False
             for bucket in merged:
+                if int(bucket.get("page", 0)) != page:
+                    continue
                 if (
                     bucket["role"] == item["role"]
                     and abs(bucket["y"] - item["y"]) <= row_tol
@@ -2120,6 +2458,7 @@ class ChatHistoryReader:
                         "text": text,
                         "y": item["y"],
                         "x": item.get("x", 0),
+                        "page": page,
                     }
                 )
         return merged

@@ -44,7 +44,7 @@ from scripts.light_interact import LightInteractScript
 from scripts.normal_use import NormalUseScript
 from scripts.mature import MatureScript
 from scripts.fast_test import FastTestScript
-from content.personas import random_persona
+from content.personas import get_persona, random_persona
 from scheduler.cron_schedule import CronScheduler
 from scheduler.batch_manager import BatchManager
 from monitor.health_check import HealthChecker, AccountState
@@ -283,13 +283,17 @@ async def cmd_cold_start_burst(args):
             registration_date=date.today().isoformat(),
             mode="full",
             state="normal",
+            persona_id="p01",
         )
         db.bind_device(serial=serial, account_id=account_id)
         print(f"临时账号: {account_id}")
+        account = db.get_account(account_id) or {}
     else:
         print(f"账号: {account_id} | 阶段: {account.get('stage', 'trust_building')}")
 
-    persona = random_persona()
+    persona_id = account.get("persona_id") or "p01"
+    persona = get_persona(persona_id) or get_persona("p01") or random_persona()
+    print(f"人格: {persona.get('id', persona_id)} | 深聊名单: {persona.get('chat_friends') or []}")
     d = device_manager.get_device(serial)
     h = Humanizer()
     wc = WeChatControl(d, h, account_id=account_id)

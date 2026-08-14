@@ -707,11 +707,38 @@ class SocialActions:
             logger.debug(f"[{self.account_id}] 绿钮检测失败: {e}")
             return None
 
+    def _recover_if_left_profile(self) -> bool:
+        """
+        误点资料页「视频号」缩略图后，从视频号页返回资料页。
+        仍在资料页则直接 True。
+        """
+        self._invalidate_ocr_cache()
+        blob = self._ocr_screen_blob(force=True)
+        if self._blob_is_friend_request(blob) and not self._blob_is_tag_picker(blob):
+            return True
+        if any(
+            k in blob for k in ("添加到通讯录", "朋友资料", "发消息", "音视频通话")
+        ):
+            return True
+        # 进了视频号/作品流：返回资料页
+        if any(k in blob for k in ("视频号", "关注", "作品", "推荐")):
+            logger.warning(f"[{self.account_id}] 疑似误入视频号，返回资料页")
+            try:
+                self.d.press("back")
+            except Exception:
+                pass
+            time.sleep(0.8)
+            self._invalidate_ocr_cache()
+            return self._is_user_profile_page()
+        return False
+
     def _click_add_to_contacts(self) -> bool:
         """
         资料页点击「添加到通讯录」，并确认进入申请页。
 
-        速度优先：绿钮 → 机型坐标 → OCR；进页用底部绿钮快判。
+        有「视频号」时按钮会被顶到缩略图下方（常为灰底横条，非绿钮），
+        中间坐标(0.40~0.58)极易点到视频封面，必须优先 OCR 点文字，
+        且坐标候选只用偏低 y。
         """
         from config.device_profiles import get_extra
         from core.wechat_nav import lock_portrait
@@ -728,24 +755,52 @@ class SocialActions:
             "加为好友",
             "添加好友",
         ]
+        blob0 = self._ocr_screen_blob()
+        has_channels = "视频号" in blob0
+        # 无视频号：按钮偏上；有视频号：按钮在缩略图下方
+        y_min = 0.52 if has_channels else 0.36
+        y_max = 0.88 if has_channels else 0.72
+        if has_channels:
+            logger.info(
+                f"[{self.account_id}] 资料页含视频号，改用偏低点击区 "
+                f"y=[{y_min:.2f},{y_max:.2f}] + OCR优先"
+            )
 
         def _after_click_ok() -> bool:
             self._invalidate_ocr_cache()
             time.sleep(0.7)
-            if self._find_green_add_button(y_min=0.36, y_max=0.65):
+            if self._is_phone_misclick_ui():
+                self._recover_from_phone_misclick()
+                return False
+            if not self._recover_if_left_profile():
                 return False
             if self._looks_like_friend_request_fast():
                 return True
-            if self._is_phone_misclick_ui():
-                self._recover_from_phone_misclick()
+            # 仍停在资料页（还能看到添加按钮）= 未点中
+            blob = self._ocr_screen_blob()
+            if any(k in blob for k in ("添加到通讯录", "添加到通讯", "加为好友")):
+                return False
             return False
 
-        def _try_green() -> bool:
-            pt = self._find_green_add_button(y_min=0.36, y_max=0.65)
+        def _try_ocr(ymin: float, ymax: float, tag: str) -> bool:
+            if self._ocr_click_phrase(
+                phrases,
+                y_min=ymin,
+                y_max=ymax,
+                strict=True,
+                avoid_keywords=("电话", "呼叫", "复制", "取消", "视频号", "关注"),
+            ):
+                if _after_click_ok():
+                    logger.info(f"[{self.account_id}] OCR{tag} 已点「添加到通讯录」")
+                    return True
+            return False
+
+        def _try_green(ymin: float, ymax: float) -> bool:
+            pt = self._find_green_add_button(y_min=ymin, y_max=ymax)
             if not pt:
                 return False
             rx, ry = float(pt[0]), float(pt[1])
-            if ry < 0.36 or ry > 0.65:
+            if ry < ymin or ry > ymax:
                 return False
             click_ratio(self.d, rx, ry)
             if _after_click_ok():
@@ -755,78 +810,85 @@ class SocialActions:
                 return True
             return False
 
-        # 1) 绿色按钮（无 OCR）
-        if _try_green():
-            return True
+        def _try_coords(points: list) -> bool:
+            for rx, ry in points:
+                click_ratio(self.d, rx, ry)
+                if _after_click_ok():
+                    logger.info(
+                        f"[{self.account_id}] 坐标点「添加到通讯录」 @({rx},{ry})"
+                    )
+                    return True
+            return False
 
-        # 2) 机型坐标（无 OCR）
-        raw = get_extra(
-            self.d,
-            "add_to_contacts_candidates",
-            [
-                (0.50, 0.43),
-                (0.50, 0.48),
-                (0.50, 0.40),
-                (0.50, 0.52),
-            ],
-        )
-        candidates = []
-        for pt in list(raw or []):
-            try:
-                rx, ry = float(pt[0]), float(pt[1])
-            except Exception:
-                continue
-            if ry < 0.36 or ry > 0.72:
-                continue
-            candidates.append((rx, ry))
-        if not candidates:
-            candidates = [(0.50, 0.43), (0.50, 0.48)]
-
-        for rx, ry in candidates[:3]:
-            click_ratio(self.d, rx, ry)
-            if _after_click_ok():
-                logger.info(
-                    f"[{self.account_id}] 坐标点「添加到通讯录」 @({rx},{ry})"
-                )
+        # —— 有视频号：OCR 优先，禁用中部坐标 ——
+        if has_channels:
+            if _try_ocr(y_min, y_max, ""):
+                return True
+            if _try_green(y_min, y_max):
+                return True
+            # 仅偏低坐标，避开缩略图带(约 0.40~0.60)
+            low_pts = [
+                (0.50, 0.66),
+                (0.50, 0.70),
+                (0.50, 0.74),
+                (0.50, 0.62),
+                (0.50, 0.78),
+            ]
+            if _try_coords(low_pts):
+                return True
+        else:
+            # —— 无视频号：绿钮 → 坐标 → OCR（旧路径，更快）——
+            if _try_green(y_min, y_max):
+                return True
+            raw = get_extra(
+                self.d,
+                "add_to_contacts_candidates",
+                [
+                    (0.50, 0.43),
+                    (0.50, 0.48),
+                    (0.50, 0.40),
+                    (0.50, 0.52),
+                ],
+            )
+            candidates = []
+            for pt in list(raw or []):
+                try:
+                    rx, ry = float(pt[0]), float(pt[1])
+                except Exception:
+                    continue
+                if ry < y_min or ry > y_max:
+                    continue
+                candidates.append((rx, ry))
+            if not candidates:
+                candidates = [(0.50, 0.43), (0.50, 0.48)]
+            if _try_coords(candidates[:4]):
+                return True
+            if _try_ocr(y_min, y_max, ""):
                 return True
 
-        # 3) OCR 兜底：「添加到通讯录」文字在屏幕上半区，y_max 收到 0.65 避开视频卡片
-        if self._ocr_click_phrase(
-            phrases,
-            y_min=0.36,
-            y_max=0.65,
-            strict=True,
-            avoid_keywords=("电话", "呼叫", "复制", "取消"),
-        ):
-            if _after_click_ok():
-                logger.info(f"[{self.account_id}] OCR 已点「添加到通讯录」")
-                return True
-
+        # 轻滑露出被挡住的按钮后再试 OCR
         try:
             self.d.swipe(
                 int(self.w * 0.5),
-                int(self.h * 0.65),
+                int(self.h * 0.72),
                 int(self.w * 0.5),
                 int(self.h * 0.48),
                 duration=0.28,
             )
             self._invalidate_ocr_cache()
-            time.sleep(0.4)
+            time.sleep(0.45)
+            self._recover_if_left_profile()
         except Exception:
             pass
 
-        if _try_green():
+        if _try_ocr(0.45, 0.90, "(滑动后)"):
             return True
-        if self._ocr_click_phrase(
-            phrases,
-            y_min=0.34,
-            y_max=0.65,
-            strict=True,
-            avoid_keywords=("电话", "呼叫", "复制", "取消"),
+        if _try_green(0.45, 0.90):
+            return True
+        if has_channels and _try_coords(
+            [(0.50, 0.64), (0.50, 0.68), (0.50, 0.72), (0.50, 0.76)]
         ):
-            if _after_click_ok():
-                logger.info(f"[{self.account_id}] OCR(滑动后) 已点「添加到通讯录」")
-                return True
+            return True
 
         return self._looks_like_friend_request_fast()
 
@@ -855,8 +917,8 @@ class SocialActions:
         if verify_msg:
             self._fill_verify_edittext_only(verify_msg)
 
-        self._dismiss_keyboard()
-        time.sleep(0.25)
+        # 备注/验证写入后键盘常挡住底部「发送」；必须收起后再点，否则会点到键盘并误判成功
+        self._ensure_friend_request_send_visible()
 
         if self._click_friend_request_send():
             return True
@@ -864,30 +926,47 @@ class SocialActions:
         logger.warning(f"[{self.account_id}] 未能点击「发送」")
         return False
 
+    def _ensure_friend_request_send_visible(self) -> None:
+        """收起键盘，尽量让申请页底部「发送」露出来。"""
+        self._dismiss_keyboard()
+        time.sleep(0.35)
+        if self._find_green_add_button(y_min=0.72, y_max=0.98):
+            return
+        # 再点一次标题区空白收键盘（避开返回键与右上角）
+        try:
+            click_ratio(self.d, 0.50, 0.08)
+            time.sleep(0.3)
+        except Exception:
+            pass
+        self._dismiss_keyboard()
+        time.sleep(0.35)
+
     def _click_friend_request_send(self) -> bool:
         """点击申请页发送：优先底部绿钮/坐标，OCR 兜底。"""
         from config.device_profiles import get_extra
 
         def _sent_ok() -> bool:
+            """
+            必须以离开申请页 / 出现结果弹窗为准。
+            旧逻辑「底部绿钮消失即成功」会在键盘遮挡绿钮时误判。
+            """
             self._invalidate_ocr_cache()
-            time.sleep(0.55)
-            if not self._find_green_add_button(y_min=0.78, y_max=0.98):
-                blob = self._ocr_screen_blob(force=True)
-                if any(k in blob for k in ("确定", "我知道了", "知道了")):
-                    self._ocr_click_any(
-                        ["确定", "我知道了", "知道了"], y_min=0.4, y_max=0.9
-                    )
-                return True
+            time.sleep(0.65)
             blob = self._ocr_screen_blob(force=True)
             if any(k in blob for k in ("确定", "我知道了", "知道了")):
                 self._ocr_click_any(
                     ["确定", "我知道了", "知道了"], y_min=0.4, y_max=0.9
                 )
                 return True
-            return not self._blob_is_friend_request(blob)
+            if self._blob_is_friend_request(blob):
+                return False
+            # 回到资料页/搜索页/会话等 = 已离开申请页
+            return True
 
-        pt = self._find_green_add_button(y_min=0.78, y_max=0.98)
-        if pt and float(pt[1]) >= 0.78:
+        self._ensure_friend_request_send_visible()
+
+        pt = self._find_green_add_button(y_min=0.72, y_max=0.98)
+        if pt and float(pt[1]) >= 0.72:
             click_ratio(self.d, float(pt[0]), float(pt[1]))
             if _sent_ok():
                 logger.info(
@@ -901,19 +980,22 @@ class SocialActions:
             "friend_request_send_candidates",
             [(0.50, 0.90), (0.50, 0.86), (0.50, 0.93), (0.50, 0.82)],
         )
-        for rx, ry in list(send_pts or [])[:3]:
+        for rx, ry in list(send_pts or [])[:4]:
             try:
                 rx_f, ry_f = float(rx), float(ry)
             except Exception:
                 continue
             if ry_f < 0.78:
                 continue
+            # 键盘若仍在，底部坐标无效；先确保绿钮可见
+            if not self._find_green_add_button(y_min=0.72, y_max=0.98):
+                self._ensure_friend_request_send_visible()
             click_ratio(self.d, rx_f, ry_f)
             if _sent_ok():
                 logger.info(f"[{self.account_id}] 坐标底部「发送」 @({rx_f},{ry_f})")
                 return True
 
-        if self._ocr_click_any(["发送"], y_min=0.75, y_max=0.98):
+        if self._ocr_click_any(["发送"], y_min=0.72, y_max=0.98):
             if _sent_ok():
                 logger.info(f"[{self.account_id}] OCR 底部点「发送」")
                 return True

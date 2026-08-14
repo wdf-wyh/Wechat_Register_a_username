@@ -64,6 +64,29 @@ def open_chat(sender: MessageSender, contact: str) -> bool:
         return False
 
 
+def _read_chat_for_llm(
+    reader: ChatHistoryReader,
+    llm: LLMClient,
+    contact: str,
+    scroll_up: int,
+    max_voice_transcribe: int = 4,
+) -> list[dict]:
+    """优先 Vision 多页截图；不可用则回退 OCR。"""
+    if llm.vision_available:
+        history = reader.read_messages_via_vision(
+            contact_name=contact,
+            scroll_up=scroll_up,
+            max_voice_transcribe=max_voice_transcribe,
+        )
+    else:
+        history = reader.read_messages_with_voice(
+            contact_name=contact,
+            scroll_up=0,
+            max_voice_transcribe=max_voice_transcribe,
+        )
+    return sanitize_chat_history_for_llm(history)
+
+
 def send_contextual_reply(
     d,
     contact: str,
@@ -74,7 +97,7 @@ def send_contextual_reply(
     max_voice_transcribe: int = 4,
 ) -> bool:
     """
-    读聊天历史（含语音转文字）后生成并发送一条回复。
+    读聊天历史（语音先转文字 → Vision 多页截图）后生成并发送一条回复。
     text 非空时直接发送，不读历史。
     LLM 不可用或生成失败时发送「请稍等」。
     """
@@ -90,12 +113,13 @@ def send_contextual_reply(
     reader = ChatHistoryReader(d, account_id=account_id)
     if open_chat(sender, contact):
         try:
-            history = reader.read_messages_with_voice(
-                contact_name=contact,
+            history = _read_chat_for_llm(
+                reader,
+                llm,
+                contact,
                 scroll_up=scroll_up,
                 max_voice_transcribe=max_voice_transcribe,
             )
-            history = sanitize_chat_history_for_llm(history)
             reply = llm.generate_chat_reply_from_history(
                 persona=persona,
                 contact=contact,
@@ -153,14 +177,18 @@ def run_ai_session(
     max_gap = 55.0
 
     print(f"[INFO] AI 深聊开始: contact={contact}, duration={duration_seconds}s")
+    mode = "Vision多页" if llm.vision_available else "OCR当前屏"
+    print(f"[INFO] 读记录模式: {mode}")
 
     while time.time() < end_at:
         remaining = end_at - time.time()
         if remaining < min_gap:
             break
 
-        ocr_history = reader.read_messages_with_voice(
-            contact_name=contact,
+        ocr_history = _read_chat_for_llm(
+            reader,
+            llm,
+            contact,
             scroll_up=scroll_up,
             max_voice_transcribe=4,
         )

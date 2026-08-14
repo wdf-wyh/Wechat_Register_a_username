@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-1v1 深度聊天冒烟测试 — 验证「打开会话 → OCR 读记录 → AI 生成 → 发送」链路。
+1v1 深度聊天冒烟测试 — 验证「打开会话 → 语音转写 → Vision多页截图 → AI 生成 → 发送」。
 
 用法:
   python -m scripts.deep_chat_smoke
@@ -29,7 +29,7 @@ from scripts.chat_history_reader import (
     merge_sent_with_ocr,
     sanitize_chat_history_for_llm,
 )
-from scripts.manual_deep_chat import LLM_UNAVAILABLE_REPLY, open_chat
+from scripts.manual_deep_chat import LLM_UNAVAILABLE_REPLY, open_chat, _read_chat_for_llm
 from storage.db import Database
 from utils.logger import get_logger, setup_logger
 
@@ -105,9 +105,18 @@ def run_smoke(contact: str, serial: str | None = None) -> dict:
 
     time.sleep(1.0)
 
-    ocr_history = reader.read_messages_with_voice(
-        contact_name=contact,
-        scroll_up=0,
+    vision_ok = llm.vision_available
+    record(
+        "vision_available",
+        vision_ok,
+        "多页截图识图" if vision_ok else "将回退 OCR",
+    )
+
+    ocr_history = _read_chat_for_llm(
+        reader,
+        llm,
+        contact,
+        scroll_up=2,
         max_voice_transcribe=4,
     )
     voice_items = [h for h in ocr_history if h.get("type") == "voice"]
@@ -117,8 +126,11 @@ def run_smoke(contact: str, serial: str | None = None) -> dict:
         f"[{account_id}] 语音: 共 {len(voice_items)} "
         f"(友 {len(friend_voice)} / 我 {len(self_voice)})"
     )
-    ocr_history = sanitize_chat_history_for_llm(ocr_history)
-    record("ocr_read_history", True, f"读到 {len(ocr_history)} 条可见消息")
+    record(
+        "read_history",
+        True,
+        f"{'Vision' if vision_ok else 'OCR'} 读到 {len(ocr_history)} 条",
+    )
 
     reply = llm.generate_chat_reply_from_history(
         persona=persona,
@@ -149,9 +161,11 @@ def run_smoke(contact: str, serial: str | None = None) -> dict:
 
     while time.time() < end_at and sent_count < MIN_SEND_COUNT:
         time.sleep(20)
-        ocr_history = reader.read_messages_with_voice(
-            contact_name=contact,
-            scroll_up=0,
+        ocr_history = _read_chat_for_llm(
+            reader,
+            llm,
+            contact,
+            scroll_up=1,
             max_voice_transcribe=4,
         )
         history = sanitize_chat_history_for_llm(

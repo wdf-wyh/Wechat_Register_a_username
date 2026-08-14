@@ -24,7 +24,8 @@ PERSONAS = [
         "daily_routine": "早通勤刷朋友圈，午休看公众号，晚上偶尔发心情",
         "topics": ["互联网", "跑步打卡", "咖啡探店", "通勤吐槽", "数码产品"],
         # 冷启动种子资源（人工预填；空则对应动作自动跳过）
-        # seed_friends 可直接填写手机号/微信号列表，Day1-3 会按 1/2/2 节奏依次添加。
+        # seed_friends：待搜索添加的微信号/手机号（申请发出即写 DB，对方未必已通过）
+        # chat_friends：已互为好友、可供深聊的备注名/昵称（与 seed_friends 严格分开）
         "seed_friends": [
             "13346396313",
             "furenlanjie118",
@@ -32,6 +33,7 @@ PERSONAS = [
             "furenlanjie711",
             "dajiang3790",
         ],
+        "chat_friends": ["30金色"],
         "seed_groups": [],
         "moments_big_v": ["课程小助手"],
         "industry_public_accounts": ["课程小助手", "极客公园", "爱范儿", "少数派", "虎嗅", "InfoQ"],

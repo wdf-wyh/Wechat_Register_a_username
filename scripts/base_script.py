@@ -727,19 +727,40 @@ class BaseScript(ABC):
         return self.wc.send_emoji()
 
     def _handle_deep_chat(self, params: dict) -> bool:
-        """多轮深度聊天：读历史（含语音转文字）→ LLM 回复，约 5 分钟"""
+        """多轮深度聊天：读历史（含语音转文字）→ LLM 回复，约 5 分钟
+
+        选人优先级（绝不回退到 seed_friends，避免聊未通过申请的人）:
+          1. params.contact
+          2. persona.chat_friends（已互为好友名单）
+          3. DB friends 中排除 seed_friends 同名后的随机一人
+        """
         contact = params.get("contact", "")
         if not contact:
-            friend = self.db.get_random_friend(self.account_id, exclude_groups=True)
-            if not friend:
-                # 回退 persona 种子好友
-                seeds = self.persona.get("seed_friends") or []
-                if not seeds:
-                    logger.debug(f"[{self.account_id}] 无好友可深聊，跳过")
-                    return True
-                contact = self.h.choice(seeds)
+            chat_friends = [
+                str(x).strip()
+                for x in (self.persona.get("chat_friends") or [])
+                if str(x).strip()
+            ]
+            if chat_friends:
+                contact = self.h.choice(chat_friends)
             else:
-                contact = friend["friend_name"]
+                seed_names = {
+                    str(x).strip()
+                    for x in (self.persona.get("seed_friends") or [])
+                    if str(x).strip()
+                }
+                candidates = [
+                    f
+                    for f in self.db.get_friends(self.account_id)
+                    if (f.get("source") or "") != "group"
+                    and str(f.get("friend_name") or "").strip() not in seed_names
+                ]
+                if not candidates:
+                    logger.debug(
+                        f"[{self.account_id}] 无 chat_friends / 已通过好友可深聊，跳过"
+                    )
+                    return True
+                contact = self.h.choice(candidates)["friend_name"]
 
         duration = int(params.get("duration", 300))
         scroll_up = int(params.get("scroll_up", 2))

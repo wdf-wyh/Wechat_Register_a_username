@@ -247,19 +247,24 @@ class EnterpriseSmoke:
         except Exception:
             pass
 
-        # B10 加好友 / 深聊：无种子则 SKIP
+        # B10 加好友 / 深聊：名单分开（seed=待加，chat=已互为好友）
         seeds = self.persona.get("seed_friends") or []
+        chat_friends = self.persona.get("chat_friends") or []
         if not seeds:
             self._record("add_friend", True, "无 seed_friends，跳过（预期）", skipped=True)
-            self._record("deep_chat", True, "无 seed_friends，跳过（预期）", skipped=True)
         else:
             await self._step_bool(
                 "add_friend",
                 lambda: social.add_friend(seeds[0], remark_source="enterprise_smoke"),
             )
+        if not chat_friends:
+            self._record("deep_chat", True, "无 chat_friends，跳过（预期）", skipped=True)
+        else:
             await self._step_bool(
                 "deep_chat",
-                lambda: social.deep_chat(seeds[0], ["在吗", "测一下"], total_seconds=40),
+                lambda: social.deep_chat(
+                    chat_friends[0], ["在吗", "测一下"], total_seconds=40
+                ),
             )
 
         # B11 群聊
