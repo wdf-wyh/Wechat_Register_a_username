@@ -92,7 +92,7 @@ def main() -> int:
     result = wc.moments_daily_interact(
         target_count=target,
         big_v_accounts=big_v,
-        comment_fn=script._moments_comment_fn(),
+        comment_fn=script._moments_comment_fn(),  # Vision 识图优先
         fresh_minutes=30,
         max_duration=600,
     )

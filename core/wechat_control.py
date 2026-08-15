@@ -229,7 +229,7 @@ class WeChatControl:
         Args:
             target_count:   目标互动次数（点赞+评论合计）
             big_v_accounts: 大 V 昵称/公众号名列表，空则仅按新鲜度排序
-            comment_fn:     (post_content, author) -> 评论文案
+            comment_fn:     (post_content, author, image_jpeg) -> 评论文案；Vision 识图优先
             fresh_minutes:  视为「新帖」的时间窗（分钟）
             max_duration:   最长执行秒数
 

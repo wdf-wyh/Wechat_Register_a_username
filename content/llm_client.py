@@ -550,7 +550,20 @@ class LLMClient:
         Returns:
             评论文本（5-25字）
         """
-        post_context = f'\n朋友圈内容："{post_text}"' if post_text else ""
+        post_text = (post_text or "").strip()
+        if post_text:
+            post_context = f'\n朋友圈正文（OCR，可能不完整）："{post_text[:180]}"'
+            relevance = (
+                "必须紧扣正文主题（食物/旅行/自拍/吐槽等），"
+                "不要根据作者昵称或配图里的App名发挥；"
+                "不要编造正文里没有的事实。"
+            )
+        else:
+            post_context = "\n（未能识别到正文，只发一句情绪向短评）"
+            relevance = (
+                "看不清正文时只发泛评（如「哈哈哈」「不错」），"
+                "不要提课程/美团/乱码/作者等臆造细节。"
+            )
         prompt = f"""你是一个微信用户，看到了朋友发的朋友圈。{post_context}
 
 你的个人画像：
@@ -558,10 +571,83 @@ class LLMClient:
 - 评论风格：{persona.get('comment_style', '简洁真诚')}
 
 请用朋友间的自然口吻写一条评论（5-25字）。
-要求：简短、自然、像随手敲的。
+要求：
+- 简短、自然、像随手敲的
+- {relevance}
+- 只输出评论正文，不要引号或解释
 """
         text = self._call_api(prompt, temperature=0.8, max_tokens=80)
         return text
+
+    def generate_moment_comment_from_image(
+        self,
+        persona: dict,
+        image_jpeg: bytes,
+        post_context: str = "",
+    ) -> str:
+        """
+        根据朋友圈帖子截图生成评论（Vision 识图，OCR 文本仅作弱提示）。
+
+        Args:
+            persona: 人格档案
+            image_jpeg: 单条帖子区域 JPEG（含文案与配图）
+            post_context: OCR 正文摘录（可选，可能有噪声）
+
+        Returns:
+            评论文本（5-25字）；Vision 不可用或失败时返回空串
+        """
+        if not image_jpeg or not self.vision_available:
+            return ""
+
+        client = self._vision_client()
+        if not client:
+            return ""
+
+        ctx = (post_context or "").strip()[:180]
+        ocr_hint = (
+            f"\n补充文字（OCR，可能不完整或有误，以画面为准）：「{ctx}」"
+            if ctx
+            else ""
+        )
+        prompt = f"""这是一张微信朋友圈里「单条动态」的截图（含文案和配图）。
+请先看画面里的正文与图片主题，再写一条你要发的评论。{ocr_hint}
+
+你的个人画像：
+- 年龄：{persona.get('age', '25-35')}
+- 兴趣：{', '.join(persona.get('hobbies', ['日常']))}
+- 评论风格：{persona.get('comment_style', '简洁真诚')}
+
+请写一条朋友圈评论（5-25字）。
+要求：
+- 简短自然，像随手敲的，不要官话
+- 必须贴合这条动态的画面/正文主题（如美食、自拍、旅行、吐槽等）
+- 不要根据昵称发挥（例如不要因为昵称带「课」就聊课程）
+- 不要根据配图里的 App 图标/桌面截图乱发挥（如美团、抖音角标）
+- 看不清时只发情绪向泛评（如「哈哈哈」「不错」），不要编造具体事实
+- 不要用话题标签，少用或不用 emoji
+- 只输出评论正文，不要引号或解释
+"""
+        b64 = base64.b64encode(image_jpeg).decode("ascii")
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
+                    },
+                    {"type": "text", "text": prompt},
+                ],
+            }
+        ]
+        raw = self._call_api_vision(
+            messages,
+            model=self._vision_model(),
+            temperature=0.55,
+            max_tokens=80,
+            client=client,
+        )
+        return (raw or "").strip().strip('"\'「」')
 
     def generate_channel_comment(
         self,

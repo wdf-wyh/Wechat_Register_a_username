@@ -76,8 +76,23 @@ _CONTEXT_NOISE = (
     "说点什么", "写评论", "发送", "直播", "合集", "展开", "收起",
     "广告", "赞助", "再看一遍", "重新播放", "收藏", "私信", "主页",
     "视频号", "发现", "微信", "搜索",
+    "未成年人模式", "不再提醒", "我知道了", "呵护未成年人",
 )
 _COUNT_RE = re.compile(r"^[\d\.]+万?$|^[\d,]+$|^\d+\.\d+[wW万]?$")
+
+# 视频号进场常见遮罩（未成年人模式等）
+_YOUTH_MODE_MARKERS = (
+    "未成年人模式",
+    "呵护未成年人",
+    "设置未成年人模式",
+    "不再提醒",
+)
+
+
+def youth_mode_overlay_hit(blob: str) -> bool:
+    """OCR/文本里是否像未成年人模式弹窗。"""
+    text = blob or ""
+    return any(k in text for k in _YOUTH_MODE_MARKERS)
 
 
 class ChannelsBrowser:
@@ -368,6 +383,96 @@ class ChannelsBrowser:
             logger.warning(f"[{self.account_id}] OCR未找到视频号，使用相对坐标")
             click_ratio(d, *self.CHANNELS_ENTRY)
         time.sleep(3)
+        self._dismiss_channels_overlays()
+
+    def _dismiss_channels_overlays(self, *, deep: bool = True) -> bool:
+        """
+        关掉视频号常见遮罩，优先「未成年人模式」弹窗。
+
+        按钮优先点绿色「不再提醒」，避免下次再弹；其次「我知道了」。
+        deep=False 时只走控件树快探（刷 feed 循环里用）。
+        """
+        d = self.d
+        dismissed = False
+
+        # 控件树偶发可用，比全屏 OCR 快
+        for label in ("不再提醒", "我知道了"):
+            try:
+                node = d(text=label)
+                if node.exists(timeout=0.35):
+                    node.click()
+                    logger.info(f"[{self.account_id}] u2 关闭遮罩: {label}")
+                    time.sleep(0.8)
+                    dismissed = True
+                    if label == "不再提醒":
+                        return True
+            except Exception:
+                pass
+
+        if not deep:
+            return dismissed
+
+        # OCR：先确认是未成年人模式类弹窗，再点按钮
+        try:
+            blob = self._screen_blob_quick()
+        except Exception:
+            blob = ""
+        if not youth_mode_overlay_hit(blob) and not dismissed:
+            return False
+
+        if ocr_find_and_click(
+            d,
+            self._get_ocr(),
+            ["不再提醒"],
+            y_min_ratio=0.45,
+            y_max_ratio=0.85,
+            x_min_ratio=0.40,
+            x_max_ratio=0.95,
+            conf_min=0.28,
+            enhance=self._enhance,
+            post_click_sleep=0.9,
+        ):
+            logger.info(f"[{self.account_id}] OCR 点「不再提醒」关闭未成年人模式弹窗")
+            return True
+
+        if ocr_find_and_click(
+            d,
+            self._get_ocr(),
+            ["我知道了", "知道了"],
+            y_min_ratio=0.45,
+            y_max_ratio=0.85,
+            x_min_ratio=0.05,
+            x_max_ratio=0.60,
+            conf_min=0.28,
+            enhance=self._enhance,
+            post_click_sleep=0.9,
+        ):
+            logger.info(f"[{self.account_id}] OCR 点「我知道了」关闭未成年人模式弹窗")
+            return True
+
+        # 弹窗仍在：右侧绿钮大致位置（Moto / 常见竖屏居中对话框）
+        if youth_mode_overlay_hit(blob):
+            logger.warning(f"[{self.account_id}] 未成年人模式弹窗 OCR 未点到，坐标兜底「不再提醒」")
+            click_ratio(d, 0.68, 0.66)
+            time.sleep(0.8)
+            return True
+        return dismissed
+
+    def _screen_blob_quick(self) -> str:
+        """中部区域快速 OCR，用于识别遮罩文案。"""
+        try:
+            img = np.array(self.d.screenshot(format="pillow"))
+            gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+            h, w = gray.shape[:2]
+            region = self._enhance(gray[int(h * 0.25):int(h * 0.78), int(w * 0.08):int(w * 0.92)])
+            results = self._get_ocr().readtext(cv2.cvtColor(region, cv2.COLOR_GRAY2BGR))
+            parts = []
+            for _, text, conf in results:
+                if conf >= 0.25 and text:
+                    parts.append(text.strip())
+            return " ".join(parts)
+        except Exception:
+            return ""
 
     def _dwell_current(self, finish_watch: bool = True) -> float:
         """在当前视频停留；完播模式尽量看到结束（或「重播」）。"""

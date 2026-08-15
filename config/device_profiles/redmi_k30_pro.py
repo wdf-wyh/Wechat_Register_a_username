@@ -112,7 +112,9 @@ PROFILE = DeviceProfile(
         "moments_camera": (0.90, 0.054),
         "moments_publish": (0.90, 0.055),
         "moments_album_done": (0.88, 0.93),
-        "moments_dots_x_ratios": (0.93, 0.91, 0.89, 0.95, 0.87),
+        "moments_dots_x_ratios": (0.92, 0.94, 0.90, 0.96),
+        "moments_dots_after_delete_dx": 50,
+        "moments_menu_comment_dx_from_like": (75, 55, 95, 115, -75, -100),
         "moments_comment_send": (0.90, 0.93),
         "moments_comment_send_candidates": [
             (0.90, 0.93),

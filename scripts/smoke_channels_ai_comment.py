@@ -85,6 +85,8 @@ def _warm_enter(browser: ChannelsBrowser) -> None:
     if not clicked:
         click_ratio(d, *browser.CHANNELS_ENTRY)
     time.sleep(2.5)
+    # Day11 会卡在「未成年人模式」弹窗；冒烟同样关掉
+    browser._dismiss_channels_overlays()
 
 
 def _reset_ui(browser: ChannelsBrowser) -> None:

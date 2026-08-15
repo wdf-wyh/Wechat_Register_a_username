@@ -413,7 +413,7 @@ class BaseScript(ABC):
 
         target = int(params.get("target_count", 20))
         fresh_minutes = int(params.get("fresh_minutes", 30))
-        max_duration = int(params.get("max_duration", 900))
+        max_duration = int(params.get("max_duration", 1200))
         big_v_accounts = params.get("big_v_accounts")
         if not big_v_accounts:
             big_v_accounts = get_moments_big_v_candidates(self.persona)
@@ -428,18 +428,30 @@ class BaseScript(ABC):
         return result.get("interactions", 0) > 0
 
     def _moments_comment_fn(self):
-        """返回 (post_content, author) -> comment；LLM 优先，模板降级。"""
+        """返回 (post_content, author, image_jpeg) -> comment；Vision 识图优先。"""
         fallback = ["不错", "学到了", "哈哈哈", "支持", "有意思", "真好看"]
 
-        def _gen(post_content: str, author: str = "") -> str:
+        def _gen(
+            post_content: str,
+            author: str = "",
+            image_jpeg: bytes | None = None,
+        ) -> str:
+            del author  # 以画面为准，避免昵称带偏
             ctx = (post_content or "").strip()[:200]
-            if author:
-                ctx = f"作者:{author} {ctx}".strip()
             try:
                 from content.llm_client import LLMClient
-                text = LLMClient().generate_comment(self.persona, ctx)
-                if text:
-                    return text[:40]
+                client = LLMClient()
+                if image_jpeg and client.vision_available:
+                    text = client.generate_moment_comment_from_image(
+                        self.persona, image_jpeg, ctx
+                    )
+                    if text:
+                        return text[:40]
+                # Vision 不可用/失败时再退回文本 LLM
+                if ctx:
+                    text = client.generate_comment(self.persona, ctx)
+                    if text:
+                        return text[:40]
             except Exception:
                 pass
             try:

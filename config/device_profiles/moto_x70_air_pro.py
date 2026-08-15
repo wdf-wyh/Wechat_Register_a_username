@@ -97,7 +97,10 @@ PROFILE = DeviceProfile(
         "moments_camera": (0.83, 0.054),
         "moments_publish": (0.88, 0.056),
         "moments_album_done": (0.88, 0.93),
-        "moments_dots_x_ratios": (0.92, 0.90, 0.88, 0.94, 0.86),
+        "moments_dots_x_ratios": (0.91, 0.93, 0.89, 0.95),
+        "moments_dots_after_delete_dx": 58,
+        # 弹层「评论」相对「赞」的水平偏移（px）；Y 与赞同行
+        "moments_menu_comment_dx_from_like": (85, 65, 105, 125, -85, -110),
         "moments_comment_send": (0.90, 0.965),
         "moments_comment_send_candidates": [
             (0.90, 0.965),
