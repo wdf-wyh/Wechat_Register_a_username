@@ -113,7 +113,11 @@ def test_enter_full_list_skips_when_already_on_history():
     browser = PublicAccountBrowser.__new__(PublicAccountBrowser)
     browser.account_id = "ut"
 
-    with patch.object(browser, "_is_account_article_list", return_value=True):
+    with (
+        patch.object(browser, "_is_account_article_list", return_value=True),
+        patch.object(browser, "_is_article_feed_empty", return_value=False),
+        patch.object(browser, "_is_breaking_news_list_page", return_value=False),
+    ):
         assert browser._enter_full_article_list_from_summary() is True
 
 
@@ -126,6 +130,8 @@ def test_enter_full_list_scrolls_then_finds_more_messages():
     with (
         patch.object(browser, "_is_pa_aggregated_summary_feed", side_effect=[True, False]),
         patch.object(browser, "_is_account_article_list", side_effect=[False, True]),
+        patch.object(browser, "_is_article_feed_empty", return_value=False),
+        patch.object(browser, "_is_breaking_news_list_page", return_value=False),
         patch.object(browser, "_is_wechat_chat_list", return_value=False),
         patch.object(browser, "_is_service_account_chat", return_value=False),
         patch.object(browser, "_looks_like_article_page", return_value=False),
@@ -199,6 +205,228 @@ def test_simulate_reading_does_segment_before_bottom():
     assert "bottom" not in scrolls[:-1]
 
 
+def test_more_messages_label_excludes_no_more_state():
+    """「已无更多消息」等否定态不得当成可点击的「更多消息」入口。"""
+    assert PublicAccountBrowser._is_more_messages_label("更多消息") is True
+    assert PublicAccountBrowser._is_more_messages_label("更多消息>") is True
+    assert PublicAccountBrowser._is_more_messages_label("已无更多消息") is False
+    assert PublicAccountBrowser._is_more_messages_label("没有更多消息") is False
+    assert PublicAccountBrowser._is_more_messages_label("暂无更多消息") is False
+    assert PublicAccountBrowser._has_actionable_more_messages("已无更多消息") is False
+    assert PublicAccountBrowser._has_actionable_more_messages("人民日报 更多消息") is True
+
+
+def test_summary_feed_ignores_no_more_messages_footer():
+    """简略流检测：列表底部的「已无更多消息」不应误判为存在「更多消息」入口。"""
+    browser = PublicAccountBrowser.__new__(PublicAccountBrowser)
+    browser.account_id = "ut"
+
+    with patch.object(
+        browser,
+        "_ocr_screen_blob",
+        side_effect=[
+            "公众号 搜索",
+            "快讯 标题 已无更多消息",
+            "公众号 搜索",
+            "快讯 标题 已无更多消息",
+        ],
+    ):
+        assert browser._is_pa_aggregated_summary_feed() is False
+        assert browser._is_breaking_news_only_feed() is False
+
+
+def test_breaking_news_only_requires_see_remaining_entry():
+    """只有快讯字样不够，必须还能看到「查看余下xx条」才算快讯卡片页。"""
+    browser = PublicAccountBrowser.__new__(PublicAccountBrowser)
+    browser.account_id = "ut"
+
+    with patch.object(
+        browser,
+        "_ocr_screen_blob",
+        side_effect=[
+            "公众号 搜索",
+            "快讯 标题一 标题二 查看余下55条",
+        ],
+    ):
+        assert browser._is_breaking_news_only_feed() is True
+
+    with patch.object(
+        browser,
+        "_ocr_screen_blob",
+        side_effect=[
+            "公众号 搜索",
+            "快讯 标题一 2小时前 标题二 5小时前",
+        ],
+    ):
+        assert browser._is_breaking_news_only_feed() is False
+
+
+def test_is_on_article_feed_breaking_news_list_page():
+    browser = PublicAccountBrowser.__new__(PublicAccountBrowser)
+    browser.account_id = "ut"
+
+    with (
+        patch.object(browser, "_is_breaking_news_list_page", return_value=True),
+        patch.object(browser, "_is_wechat_chat_list", return_value=False),
+        patch.object(browser, "_is_service_account_chat", return_value=False),
+        patch.object(browser, "_is_account_profile_home", return_value=False),
+    ):
+        assert browser._is_on_article_feed() is True
+
+
+def test_is_on_article_feed_breaking_news_card():
+    browser = PublicAccountBrowser.__new__(PublicAccountBrowser)
+    browser.account_id = "ut"
+
+    with (
+        patch.object(browser, "_is_breaking_news_list_page", return_value=False),
+        patch.object(browser, "_is_breaking_news_only_feed", return_value=True),
+        patch.object(browser, "_is_wechat_chat_list", return_value=False),
+        patch.object(browser, "_is_service_account_chat", return_value=False),
+        patch.object(browser, "_is_account_profile_home", return_value=False),
+    ):
+        assert browser._is_on_article_feed() is True
+
+
+def test_more_messages_skipped_when_on_breaking_news_list():
+    browser = PublicAccountBrowser.__new__(PublicAccountBrowser)
+    browser.account_id = "ut"
+    browser._using_breaking_news_feed = True
+
+    with patch.object(browser, "_ocr_click_more_messages") as m_click:
+        ok = browser._enter_full_article_list_from_summary()
+
+    assert ok is True
+    m_click.assert_not_called()
+
+
+def test_ensure_feed_list_stays_on_breaking_news_list():
+    browser = PublicAccountBrowser.__new__(PublicAccountBrowser)
+    browser.account_id = "ut"
+    browser.d = MagicMock()
+
+    with (
+        patch.object(browser, "_is_unexpected_overlay", return_value=False),
+        patch.object(browser, "_is_image_viewer", return_value=False),
+        patch.object(browser, "_is_service_account_chat", return_value=False),
+        patch.object(browser, "_is_wechat_chat_list", return_value=False),
+        patch.object(browser, "_is_breaking_news_list_page", return_value=True),
+        patch.object(browser, "_enter_full_article_list_from_summary") as m_more,
+        patch.object(browser, "_enter_breaking_news_list") as m_breaking,
+        patch("core.public_account_browser.time.sleep"),
+    ):
+        ok = browser._ensure_on_feed_list()
+
+    assert ok is True
+    assert browser._using_breaking_news_feed is True
+    m_more.assert_not_called()
+    m_breaking.assert_not_called()
+    browser.d.press.assert_not_called()
+
+
+def test_empty_more_messages_list_falls_back_to_breaking_news():
+    """更多消息进入空列表后应返回并走快讯方案。"""
+    browser = PublicAccountBrowser.__new__(PublicAccountBrowser)
+    browser.account_id = "ut"
+    browser.w, browser.h = 1080, 2400
+    browser.d = MagicMock()
+
+    with (
+        patch.object(browser, "_is_account_article_list", return_value=False),
+        patch.object(browser, "_page_after_more_messages_click", return_value=True),
+        patch.object(browser, "_is_article_feed_empty", return_value=True),
+        patch.object(browser, "_is_breaking_news_list_page", return_value=False),
+        patch.object(browser, "_enter_breaking_news_list", return_value=True) as m_breaking,
+        patch("core.public_account_browser.time.sleep"),
+        patch.object(browser, "_looks_like_article_page", return_value=False),
+        patch.object(browser, "_is_account_profile_home", return_value=False),
+        patch.object(browser, "_is_wechat_chat_list", return_value=False),
+        patch.object(browser, "_is_service_account_chat", return_value=False),
+        patch.object(browser, "_ocr_click_more_messages", return_value=True),
+    ):
+        ok = browser._enter_full_article_list_from_summary()
+
+    assert ok is True
+    browser.d.press.assert_called_once_with("back")
+    m_breaking.assert_called_once_with(from_fallback=True)
+
+
+def test_more_messages_blank_page_skips_swipe_retry():
+    """空白列表降级后不应继续下滑重试「更多消息」。"""
+    browser = PublicAccountBrowser.__new__(PublicAccountBrowser)
+    browser.account_id = "ut"
+    browser.w, browser.h = 1080, 2400
+    browser.d = MagicMock()
+
+    with (
+        patch.object(browser, "_is_account_article_list", return_value=False),
+        patch.object(browser, "_page_after_more_messages_click", return_value=True),
+        patch.object(browser, "_is_article_feed_empty", return_value=True),
+        patch.object(browser, "_is_breaking_news_list_page", return_value=False),
+        patch.object(browser, "_try_breaking_news_fallback", return_value=True) as m_fallback,
+        patch("core.public_account_browser.time.sleep"),
+        patch.object(browser, "_looks_like_article_page", return_value=False),
+        patch.object(browser, "_is_account_profile_home", return_value=False),
+        patch.object(browser, "_is_wechat_chat_list", return_value=False),
+        patch.object(browser, "_is_service_account_chat", return_value=False),
+        patch.object(browser, "_ocr_click_more_messages", return_value=True),
+    ):
+        ok = browser._enter_full_article_list_from_summary()
+
+    assert ok is True
+    m_fallback.assert_called_once()
+    browser.d.swipe.assert_not_called()
+
+
+def test_nonempty_more_messages_list_stays_on_history():
+    browser = PublicAccountBrowser.__new__(PublicAccountBrowser)
+    browser.account_id = "ut"
+
+    with (
+        patch.object(browser, "_is_article_feed_empty", return_value=False),
+        patch.object(browser, "_enter_breaking_news_list") as m_breaking,
+    ):
+        ok = browser._finalize_entered_article_list("更多消息")
+
+    assert ok is True
+    m_breaking.assert_not_called()
+
+
+def test_capture_article_context_filters_ad_lines():
+    """抓正文摘要时应跳过广告/推荐阅读/互动栏，避免评论被带偏。"""
+    browser = PublicAccountBrowser.__new__(PublicAccountBrowser)
+    browser.account_id = "ut"
+    browser.w, browser.h = 1080, 2400
+    browser.d = MagicMock()
+
+    fake_results = [
+        (None, "这篇文章的核心观点很清楚", 0.92),
+        (None, "广告", 0.95),
+        (None, "商务合作请联系作者", 0.88),
+        (None, "推荐阅读", 0.90),
+        (None, "点击下方小程序立即查看", 0.91),
+        (None, "作者把案例拆得很细", 0.93),
+        (None, "写留言", 0.97),
+    ]
+
+    with (
+        patch("core.public_account_browser.np.array", return_value=MagicMock()),
+        patch("core.public_account_browser.cv2.cvtColor", return_value=MagicMock()),
+        patch.object(browser, "_enhance", return_value=MagicMock()),
+        patch.object(browser, "_get_ocr") as m_ocr,
+        patch.object(browser, "_normalize_ocr_text", side_effect=lambda s: s),
+    ):
+        m_ocr.return_value.readtext.return_value = fake_results
+        context = browser._capture_article_context("测试标题")
+
+    assert "广告" not in context
+    assert "商务合作" not in context
+    assert "推荐阅读" not in context
+    assert "点击下方小程序立即查看" not in context
+    assert "写留言" not in context
+    assert context == "这篇文章的核心观点很清楚 作者把案例拆得很细"
+
+
 def main() -> int:
     test_comment_only_after_full_read()
     test_article_bottom_requires_both_comment_markers()
@@ -207,6 +435,17 @@ def main() -> int:
     test_enter_full_list_scrolls_then_finds_more_messages()
     test_try_open_allows_account_article_list()
     test_simulate_reading_does_segment_before_bottom()
+    test_more_messages_label_excludes_no_more_state()
+    test_summary_feed_ignores_no_more_messages_footer()
+    test_breaking_news_only_requires_see_remaining_entry()
+    test_is_on_article_feed_breaking_news_list_page()
+    test_is_on_article_feed_breaking_news_card()
+    test_more_messages_skipped_when_on_breaking_news_list()
+    test_ensure_feed_list_stays_on_breaking_news_list()
+    test_empty_more_messages_list_falls_back_to_breaking_news()
+    test_more_messages_blank_page_skips_swipe_retry()
+    test_nonempty_more_messages_list_stays_on_history()
+    test_capture_article_context_filters_ad_lines()
     # 保留原有标题校验
     from scripts.test_pa_article_open_unit import (
         test_title_already_read_prefix,

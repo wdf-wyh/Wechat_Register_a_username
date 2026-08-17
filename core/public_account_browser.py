@@ -79,6 +79,8 @@ class PublicAccountBrowser:
         self._failed_title_keys: set[str] = set()
         # 本轮 browse 是否已尝试进入单号完整文章列表（避免每次回列表都重复探测）
         self._full_list_probed = False
+        # 本轮是否已切到快讯完整列表（避免回到简略流后又去找「更多消息」）
+        self._using_breaking_news_feed = False
         # 最近一次 browse 统计（供剧本 handler 判成败）
         self.last_articles_read = 0
         self.last_comments_sent = 0
@@ -115,13 +117,19 @@ class PublicAccountBrowser:
         self._read_title_keys.clear()
         self._failed_title_keys.clear()
         self._full_list_probed = False
+        self._using_breaking_news_feed = False
         self.last_articles_read = 0
         self.last_comments_sent = 0
 
         try:
             self._open_public_accounts()
-            # 进入公众号列表后，优先主动探测一次「更多消息」入口
-            self._full_list_probed = self._enter_full_article_list_from_summary()
+            # 新号降级：只有快讯时，先进入快讯完整列表
+            if self._is_breaking_news_only_feed():
+                logger.info(f"[{self.account_id}] 检测到新号仅快讯场景，执行降级进入快讯列表")
+                self._full_list_probed = self._enter_breaking_news_list()
+            else:
+                # 进入公众号列表后，优先主动探测一次「更多消息」入口
+                self._full_list_probed = self._enter_full_article_list_from_summary()
 
             start = time.time()
             while time.time() - start < duration_seconds:
@@ -525,7 +533,230 @@ class PublicAccountBrowser:
         if "公众号" not in top:
             return False
         mid = self._ocr_screen_blob(0.10, 0.88)
-        return any(k in mid for k in ("更多消息", "订阅精选"))
+        if "订阅精选" in mid:
+            return True
+        return self._has_actionable_more_messages(mid)
+
+    def _is_breaking_news_only_feed(self) -> bool:
+        """
+        新号场景：公众号页面只有「快讯」区块，没有普通订阅号文章。
+        特征：顶栏有「公众号」，可见「快讯」，且屏上仍能看到「查看余下xx条」
+        这种卡片入口；真正进入快讯列表后虽然也可能出现「快讯」字样，但通常
+        不再有该入口，避免返回列表后被误判为卡片页而反复重进。
+        """
+        top = self._ocr_screen_blob(0.0, 0.18)
+        if "公众号" not in top:
+            return False
+        mid = self._ocr_screen_blob(0.08, 0.92)
+        if "快讯" not in mid:
+            return False
+        # 有普通订阅流特征则不是纯快讯场景
+        if "订阅精选" in mid or self._has_actionable_more_messages(mid):
+            return False
+        return self._has_actionable_see_remaining(mid)
+
+    @staticmethod
+    def _has_actionable_see_remaining(text: str) -> bool:
+        """页面是否仍可见「查看余下xx条」这类快讯卡片入口。"""
+        t = re.sub(r"\s+", "", (text or "").strip())
+        if not t:
+            return False
+        if re.search(r"查看余下\d+条", t):
+            return True
+        return "查看余下" in t and len(t) <= 16
+
+    @staticmethod
+    def _is_see_remaining_label(text: str) -> bool:
+        """OCR 文本是否为「查看余下xx条」入口。"""
+        t = re.sub(r"\s+", "", (text or "").strip())
+        if not t:
+            return False
+        # 匹配「查看余下N条」/「查看余下N条消息」/「查看余下61条」等
+        if re.search(r"查看余下\d+条", t):
+            return True
+        # 也兼容简写如「查看余下」
+        if "查看余下" in t and len(t) <= 16:
+            return True
+        return False
+
+    def _ocr_click_see_remaining(self) -> bool:
+        """OCR 定位并点击「查看余下xx条」入口。"""
+        d, w, h = self.d, self.w, self.h
+        img = np.array(d.screenshot(format="pillow"))
+        gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+        results = self._get_ocr().readtext(
+            cv2.cvtColor(self._enhance(gray), cv2.COLOR_GRAY2BGR)
+        )
+
+        best: tuple[tuple, int, int, str] | None = None
+        for bbox, text, conf in results:
+            if conf < 0.28:
+                continue
+            cleaned = self._normalize_ocr_text(text)
+            if not self._is_see_remaining_label(cleaned):
+                continue
+            y0 = int(bbox[0][1])
+            cy = int((bbox[0][1] + bbox[2][1]) / 2)
+            cx = int((bbox[0][0] + bbox[2][0]) / 2)
+            if not (int(h * 0.10) < y0 < int(h * 0.90)):
+                continue
+            score = (len(cleaned), -float(conf), -cy)
+            if best is None or score < best[0]:
+                best = (score, cx, cy, cleaned)
+
+        if best is None:
+            return False
+
+        _, cx, cy, label = best
+        logger.info(
+            f"[{self.account_id}] OCR 命中「查看余下」: '{label}' @({cx},{cy})"
+        )
+        d.click(cx, cy)
+        time.sleep(1.8)
+        return True
+
+    def _page_after_more_messages_click(self) -> bool:
+        """点击「更多消息」后是否已离开简略订阅流（含空白历史列表）。"""
+        if (
+            self._is_wechat_chat_list()
+            or self._is_service_account_chat()
+            or self._is_account_profile_home()
+            or self._looks_like_article_page()
+            or self._is_pa_aggregated_summary_feed()
+        ):
+            return False
+        return True
+
+    def _mark_breaking_news_feed_active(self):
+        """已进入快讯完整列表，后续勿再走「更多消息」路径。"""
+        self._full_list_probed = True
+        self._using_breaking_news_feed = True
+
+    def _is_breaking_news_list_page(self) -> bool:
+        """是否已在快讯完整列表（顶栏「快讯」且无「查看余下」卡片入口）。"""
+        top = self._ocr_screen_blob(0.0, 0.22)
+        if "快讯" not in top:
+            return False
+        mid = self._ocr_screen_blob(0.08, 0.92)
+        if self._has_actionable_see_remaining(mid):
+            return False
+        return True
+
+    def _enter_breaking_news_list(self, from_fallback: bool = False) -> bool:
+        """
+        新号场景降级：进入公众号「快讯」的完整文章列表。
+        点击「查看余下xx条」跳转后，后续阅读逻辑与普通文章列表一致。
+        """
+        d, w, h = self.d, self.w, self.h
+        logger.info(f"[{self.account_id}] 新号场景：仅有快讯，尝试进入完整快讯列表")
+
+        # 从空白列表返回后，「查看余下」通常就在当前屏，禁止先下滑
+        if from_fallback or self._has_actionable_see_remaining(
+            self._ocr_screen_blob(0.08, 0.92)
+        ):
+            if self._ocr_click_see_remaining():
+                time.sleep(0.5)
+                if self._is_breaking_news_list_page() or self._is_on_article_feed():
+                    self._mark_breaking_news_feed_active()
+                    logger.info(f"[{self.account_id}] 已进入快讯列表页")
+                    return True
+
+        max_attempts = 2 if from_fallback else 3
+        for attempt in range(1, max_attempts + 1):
+            if attempt > 1:
+                try:
+                    d.swipe(
+                        int(w * 0.50),
+                        int(h * 0.70),
+                        int(w * 0.50),
+                        int(h * 0.32),
+                        duration=0.4,
+                    )
+                except Exception:
+                    pass
+                time.sleep(0.5)
+
+            clicked = self._ocr_click_see_remaining()
+            if not clicked:
+                logger.debug(
+                    f"[{self.account_id}] 第 {attempt}/{max_attempts} 轮未找到「查看余下」，继续下滑"
+                )
+                continue
+
+            if self._looks_like_article_page():
+                logger.warning(
+                    f"[{self.account_id}] 误点进文章正文，返回继续找「查看余下」"
+                )
+                d.press("back")
+                time.sleep(0.8)
+                continue
+
+            if (
+                self._is_breaking_news_list_page()
+                or self._is_account_article_list()
+                or self._is_on_article_feed()
+            ):
+                self._mark_breaking_news_feed_active()
+                logger.info(f"[{self.account_id}] 已进入快讯完整列表，开始正常阅读")
+                return True
+
+            logger.debug(
+                f"[{self.account_id}] 点击「查看余下」后页面未识别为列表，重试 {attempt}/{max_attempts}"
+            )
+            d.press("back")
+            time.sleep(0.7)
+
+        logger.warning(f"[{self.account_id}] 未能进入快讯完整列表")
+        return False
+
+    def _is_article_feed_empty(self) -> bool:
+        """当前文章列表页是否为空（无可点选文章）。"""
+        if self._looks_like_article_page() or self._is_account_profile_home():
+            return False
+        mid = self._ocr_screen_blob(0.10, 0.90)
+        if any(
+            k in mid
+            for k in (
+                "暂无消息",
+                "暂无内容",
+                "还没有消息",
+                "没有消息",
+                "暂无文章",
+                "快来关注",
+                "长按扫码关注",
+                "暂无历史消息",
+            )
+        ):
+            return True
+        if self._scan_feed_article_candidates():
+            return False
+        time_hits = sum(
+            1
+            for token in re.split(r"\s+", mid)
+            if self._is_feed_timestamp(self._normalize_ocr_text(token))
+        )
+        if time_hits >= 1:
+            return False
+        # 空白历史列表：中部几乎无有效文字（仅顶栏账号名/导航）
+        content_fp = self._title_fingerprint(mid)
+        return len(content_fp) <= 12
+
+    def _try_breaking_news_fallback(self, reason: str) -> bool:
+        """从当前列表返回，并尝试快讯「查看余下xx条」方案。"""
+        logger.info(f"[{self.account_id}] {reason}，返回上一步并尝试快讯方案")
+        self.d.press("back")
+        time.sleep(1.0)
+        ok = self._enter_breaking_news_list(from_fallback=True)
+        if ok:
+            self._mark_breaking_news_feed_active()
+        return ok
+
+    def _finalize_entered_article_list(self, source: str) -> bool:
+        """进入文章列表后校验是否有内容；空列表则降级到快讯方案。"""
+        if self._is_article_feed_empty():
+            return self._try_breaking_news_fallback(f"{source}进入的列表为空")
+        logger.info(f"[{self.account_id}] 已进入文章列表（{source}）")
+        return True
 
     def _is_account_profile_home(self) -> bool:
         """误入单个公众号主页（可关注/发消息），不是可点选文章的列表。"""
@@ -556,10 +787,20 @@ class PublicAccountBrowser:
         return False
 
     @staticmethod
-    def _is_more_messages_label(text: str) -> bool:
-        """OCR 文本是否为「更多消息」入口（短标签），排除长标题误匹配。"""
+    def _has_actionable_more_messages(text: str) -> bool:
+        """页面是否含可点的「更多消息」入口（排除「已无更多消息」等否定态）。"""
         t = re.sub(r"\s+", "", (text or "").strip())
-        if not t or len(t) > 18 or "更多消息" not in t:
+        if "更多消息" not in t:
+            return False
+        return not re.search(r"(已|没有|无|暂无).{0,2}更多消息", t)
+
+    @staticmethod
+    def _is_more_messages_label(text: str) -> bool:
+        """OCR 文本是否为「更多消息」入口（短标签），排除长标题/否定句误匹配。"""
+        t = re.sub(r"\s+", "", (text or "").strip())
+        if not t or len(t) > 18:
+            return False
+        if not PublicAccountBrowser._has_actionable_more_messages(t):
             return False
         rest = re.sub(r"更多消息", "", t)
         rest = re.sub(r"[>›》）)）\s]+", "", rest)
@@ -606,8 +847,11 @@ class PublicAccountBrowser:
 
     def _enter_full_article_list_from_summary(self) -> bool:
         """从公众号文章列表页下滑并严格点击「更多消息」，进入单号完整文章列表。"""
-        if self._is_account_article_list():
+        if getattr(self, "_using_breaking_news_feed", False) or self._is_breaking_news_list_page():
+            logger.debug(f"[{self.account_id}] 已在快讯完整列表，跳过「更多消息」")
             return True
+        if self._is_account_article_list():
+            return self._finalize_entered_article_list("历史列表")
         if (
             self._is_wechat_chat_list()
             or self._is_service_account_chat()
@@ -667,7 +911,7 @@ class PublicAccountBrowser:
                 )
                 continue
 
-            time.sleep(0.35)
+            time.sleep(0.85)
             if self._looks_like_article_page():
                 logger.warning(
                     f"[{self.account_id}] 误点进文章正文，返回后继续找「更多消息」"
@@ -682,12 +926,19 @@ class PublicAccountBrowser:
                 d.press("back")
                 time.sleep(0.8)
                 continue
-            if self._is_account_article_list():
-                logger.info(f"[{self.account_id}] 已进入单号完整文章列表")
-                return True
+
+            # 已离开简略流：含空白历史列表（勿再走 back+下滑 重试更多消息）
+            if self._page_after_more_messages_click():
+                if self._is_article_feed_empty():
+                    return self._try_breaking_news_fallback("更多消息进入的列表为空")
+                if self._is_account_article_list():
+                    return self._finalize_entered_article_list("更多消息")
+                if self._scan_feed_article_candidates():
+                    return self._finalize_entered_article_list("更多消息")
+                return self._try_breaking_news_fallback("更多消息进入的页面无可读文章")
 
             logger.debug(
-                f"[{self.account_id}] 已点「更多消息」但未进完整列表，重试 {attempt}/4"
+                f"[{self.account_id}] 已点「更多消息」但未离开简略流，重试 {attempt}/4"
             )
             d.press("back")
             time.sleep(0.7)
@@ -715,6 +966,12 @@ class PublicAccountBrowser:
             return False
         if self._is_account_profile_home():
             return False
+        # 快讯完整列表：顶栏「快讯」+ 文章时间戳，必须优先于其它判定
+        if self._is_breaking_news_list_page():
+            return True
+        # 快讯卡片页（有「查看余下」）
+        if self._is_breaking_news_only_feed():
+            return True
         if self._is_pa_aggregated_summary_feed() or self._is_account_article_list():
             return True
         if self._looks_like_article_page():
@@ -760,11 +1017,28 @@ class PublicAccountBrowser:
                 if self._is_on_article_feed():
                     return True
                 continue
-            if self._is_pa_aggregated_summary_feed():
+            if self._is_breaking_news_list_page():
+                self._mark_breaking_news_feed_active()
+                return True
+            if getattr(self, "_using_breaking_news_feed", False) and self._is_on_article_feed():
+                return True
+            if self._is_breaking_news_only_feed():
+                logger.info(f"[{self.account_id}] 回到快讯卡片页，再次进入完整快讯列表")
+                self._enter_breaking_news_list()
+                if self._is_on_article_feed():
+                    return True
+            if (
+                not getattr(self, "_using_breaking_news_feed", False)
+                and self._is_pa_aggregated_summary_feed()
+            ):
                 self._enter_full_article_list_from_summary()
                 if self._is_on_article_feed():
                     return True
-            if (not self._full_list_probed) and self._is_on_article_feed():
+            if (
+                (not self._full_list_probed)
+                and (not getattr(self, "_using_breaking_news_feed", False))
+                and self._is_on_article_feed()
+            ):
                 self._enter_full_article_list_from_summary()
                 self._full_list_probed = True
                 if self._is_on_article_feed():
@@ -2152,6 +2426,73 @@ class PublicAccountBrowser:
         """
         return self._is_account_profile_home() or self._is_account_article_list()
 
+    @staticmethod
+    def _is_article_context_noise(text: str, title: str = "") -> bool:
+        """
+        过滤不该喂给评论生成的噪声文本：
+        - 广告/商务推广/引流 CTA
+        - 推荐阅读/相关阅读等列表区
+        - 文章交互栏与评论占位文案
+        """
+        clean = (text or "").strip()
+        if not clean:
+            return True
+        if title and clean == title:
+            return True
+        if len(clean) <= 1:
+            return True
+
+        exact_noise = {
+            "广告",
+            "推广",
+            "赞助",
+            "相关推荐",
+            "推荐阅读",
+            "相关阅读",
+            "延伸阅读",
+            "写留言",
+            "写评论",
+            "说点什么",
+            "发表评论",
+            "阅读原文",
+            "收藏",
+            "分享",
+            "点赞",
+            "在看",
+        }
+        if clean in exact_noise:
+            return True
+
+        noise_substrings = (
+            "广告",
+            "推广",
+            "赞助",
+            "商务合作",
+            "扫码",
+            "识别二维码",
+            "长按识别",
+            "点击下方",
+            "立即购买",
+            "立即查看",
+            "点击领取",
+            "关注我们",
+            "推荐阅读",
+            "相关阅读",
+            "延伸阅读",
+            "往期回顾",
+            "点击小程序",
+            "阅读原文",
+            "写留言",
+            "写评论",
+            "说点什么",
+            "发表评论",
+            "收藏",
+            "分享",
+            "点赞",
+            "在看",
+        )
+        return any(k in clean for k in noise_substrings)
+
     def _capture_article_context(self, title: str) -> str:
         """抓取文章页可见正文摘要，供评论/发圈生成使用。"""
         img = np.array(self.d.screenshot(format="pillow"))
@@ -2162,11 +2503,9 @@ class PublicAccountBrowser:
         lines = []
         for _, text, conf in results:
             clean = self._normalize_ocr_text(text)
-            if conf <= 0.38 or not clean or clean == title:
+            if conf <= 0.38:
                 continue
-            if len(clean) <= 1:
-                continue
-            if any(k in clean for k in ("广告", "分享", "收藏", "点赞", "写留言", "说点什么")):
+            if self._is_article_context_noise(clean, title=title):
                 continue
             lines.append(clean)
         if not lines:
@@ -2264,7 +2603,9 @@ class PublicAccountBrowser:
         if _ARTICLE_BOTTOM_INPUT not in lower_blob:
             return False
         upper_blob = self._ocr_region_blob(0.40, 0.85)
-        return _ARTICLE_BOTTOM_TITLE in upper_blob
+        # 关键：上方“留言”应是留言区标题（通常不紧跟“写”），
+        # 避免把下方输入占位“写留言”里包含的“留言”误当标题。
+        return bool(re.search(r"(?<!写)留言", upper_blob))
 
     def _scroll_to_article_bottom(
         self,
