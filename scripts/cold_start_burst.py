@@ -153,6 +153,12 @@ def _sync_registration_day(db, account_id: str, day_index: int) -> None:
 
 
 async def _execute_action(script: ColdStartBurstScript, action: Action) -> bool:
+    from utils.image_utils import (
+        append_cron_evidence,
+        format_evidence_message,
+        save_action_keyframe,
+    )
+
     handler = script._action_handlers.get(action.action_type)
     if not handler:
         logger.warning(f"无 handler: {action.action_type.value}")
@@ -162,6 +168,12 @@ async def _execute_action(script: ColdStartBurstScript, action: Action) -> bool:
     try:
         result = bool(handler(action.params))
         elapsed = time.time() - start
+        shot = save_action_keyframe(
+            script.wc.d,
+            script.account_id,
+            action.action_type.value,
+            success=result,
+        )
         script.db.log_action(
             account_id=script.account_id,
             action_type=action.action_type.value,
@@ -170,6 +182,16 @@ async def _execute_action(script: ColdStartBurstScript, action: Action) -> bool:
                 **action.params,
                 "_burst_day": script._simulated_day_index,
             },
+            screenshot_path=shot or "",
+        )
+        append_cron_evidence(
+            script.account_id, action.action_type.value, result, shot
+        )
+        logger.info(
+            "[证据] "
+            + format_evidence_message(
+                script.account_id, action.action_type.value, result, shot
+            )
         )
         script.metrics.record_action(
             script.account_id,
@@ -183,6 +205,12 @@ async def _execute_action(script: ColdStartBurstScript, action: Action) -> bool:
             f"[{script.account_id}] Day{script._simulated_day_index} "
             f"{action.action_type.value} 异常: {e}"
         )
+        shot = save_action_keyframe(
+            script.wc.d,
+            script.account_id,
+            action.action_type.value,
+            success=False,
+        )
         script.db.log_action(
             account_id=script.account_id,
             action_type=action.action_type.value,
@@ -192,6 +220,16 @@ async def _execute_action(script: ColdStartBurstScript, action: Action) -> bool:
                 **action.params,
                 "_burst_day": script._simulated_day_index,
             },
+            screenshot_path=shot or "",
+        )
+        append_cron_evidence(
+            script.account_id, action.action_type.value, False, shot
+        )
+        logger.info(
+            "[证据] "
+            + format_evidence_message(
+                script.account_id, action.action_type.value, False, shot
+            )
         )
         return False
 

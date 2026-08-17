@@ -21,7 +21,12 @@ from core.wechat_control import WeChatControl
 from core.humanizer import Humanizer
 from storage.db import Database
 from utils.logger import get_logger
-from utils.image_utils import save_debug_screenshot
+from utils.image_utils import (
+    append_cron_evidence,
+    format_evidence_message,
+    save_action_keyframe,
+    save_debug_screenshot,
+)
 from monitor.metrics import MetricsReporter
 
 logger = get_logger("scripts")
@@ -256,12 +261,33 @@ class BaseScript(ABC):
                             f"[{self.account_id}] 动作未成功: {action.action_type.value}"
                         )
 
-                    # 记录日志
+                    shot = save_action_keyframe(
+                        self.wc.d,
+                        self.account_id,
+                        action.action_type.value,
+                        success=bool(result),
+                    )
                     self.db.log_action(
                         account_id=self.account_id,
                         action_type=action.action_type.value,
                         success=result,
                         action_params=action.params,
+                        screenshot_path=shot or "",
+                    )
+                    append_cron_evidence(
+                        self.account_id,
+                        action.action_type.value,
+                        bool(result),
+                        shot,
+                    )
+                    logger.info(
+                        "[证据] "
+                        + format_evidence_message(
+                            self.account_id,
+                            action.action_type.value,
+                            bool(result),
+                            shot,
+                        )
                     )
 
                     # 上报指标
@@ -275,15 +301,36 @@ class BaseScript(ABC):
                     logger.error(
                         f"[{self.account_id}] 动作异常 {action.action_type.value}: {e}"
                     )
+                    shot = save_action_keyframe(
+                        self.wc.d,
+                        self.account_id,
+                        action.action_type.value,
+                        success=False,
+                    ) or save_debug_screenshot(
+                        self.wc.d, self.account_id, action.action_type.value
+                    )
                     self.db.log_action(
                         account_id=self.account_id,
                         action_type=action.action_type.value,
                         success=False,
                         error_msg=str(e),
                         action_params=action.params,
-                        screenshot_path=save_debug_screenshot(
-                            self.wc.d, self.account_id, action.action_type.value
-                        ) or "",
+                        screenshot_path=shot or "",
+                    )
+                    append_cron_evidence(
+                        self.account_id,
+                        action.action_type.value,
+                        False,
+                        shot,
+                    )
+                    logger.info(
+                        "[证据] "
+                        + format_evidence_message(
+                            self.account_id,
+                            action.action_type.value,
+                            False,
+                            shot,
+                        )
                     )
 
                 # 动作间随机间隔
