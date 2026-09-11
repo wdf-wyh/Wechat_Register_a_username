@@ -1,0 +1,26 @@
+# Bug report
+name: Bug report
+description: Report a failure on real devices or scripts
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please redact personal WeChat data. Do not paste API keys.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: Expected vs actual
+    validations:
+      required: true
+  - type: input
+    id: device
+    attributes:
+      label: Device / WeChat version
+      placeholder: e.g. Moto X70 Air Pro / WeChat x.x.x
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log lines
+      render: shell

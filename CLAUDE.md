@@ -400,5 +400,6 @@ export DINGTALK_WEBHOOK=https://oapi.dingtalk.com/robot/send?access_token=xxx
 ---
 
 > **项目版本**: v2.5 | **更新**: 2026-08-05
-> **详细方案**: 参见 `../具体执行方案.md`
+> **详细方案**: 参见 [`docs/具体执行方案.md`](docs/具体执行方案.md)
+> **开源主页**: [`README.md`](README.md) / [`README.zh-CN.md`](README.zh-CN.md)
 > **本版新增**: 官方小游戏（发现→游戏→跳一跳等）、14 天冷启动分相位、AI 上帝视角编排器

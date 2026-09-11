@@ -1,0 +1,29 @@
+# Feature request
+name: Feature request
+description: Suggest an improvement for scripts, device profiles, or ops
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What is hard or missing today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: Ideal behavior (keep real-device / no-hook constraints)
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Scripts / cold start
+        - Core automation
+        - Device profile
+        - Docs / packaging
+        - Other

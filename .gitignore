@@ -1,6 +1,7 @@
 wechat_env/
 __pycache__/
 *.pyc
+*.pyo
 *.db
 logs/
 screenshots/
@@ -8,14 +9,17 @@ data/
 py测试/
 .vscode/
 .idea/
+.pytest_cache/
 .env
 .env.*
 !.env.example
-*.pyo
 .DS_Store
 Thumbs.db
 
-# 汇报和文档（不上传）
+# Local reports / shortcuts (do not upload)
 *.pptx
 *.lnk
 进度汇报/
+
+# Patch scratch (keep out of public tree unless intentional)
+_patch_*.py
